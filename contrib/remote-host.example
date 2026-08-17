@@ -1,0 +1,16 @@
+# WHERE THIS GOES — THIS Linux host as root, NOT the laptop
+#   /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf
+#   then: sshd -t && systemctl reload sshd
+#
+# Makes sshd accept password+OTP and allow Remote-SSH forwarding.
+# First Factor = password. Second Factor = TOTP (not the password again).
+# remote.SSH.* keys do not go here.
+
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+# OpenSSH 9.9+ bans the client IP after a hung OTP prompt.
+# Replace with the operator workstation CIDRs.
+PerSourcePenaltyExemptList 192.0.2.0/24,198.51.100.0/24

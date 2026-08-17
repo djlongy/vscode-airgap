@@ -1,0 +1,37 @@
+{
+  // WHERE THIS GOES — operator laptop, NOT the remote host
+  //   Windows:  %APPDATA%\Code\User\settings.json
+  //   macOS:    ~/Library/Application Support/Code/User/settings.json
+  //   Linux:    ~/.config/Code/User/settings.json
+  // Merge these keys (JSONC: // comments are fine). UTF-8, no BOM.
+  // Omit remote.SSH.path on Unix.
+
+  // So the password + TOTP prompts are visible.
+  "remote.SSH.showLoginTerminal": true,
+
+  // Reuse the OTP login. Required on Windows (no ControlMaster).
+  "remote.SSH.useLocalServer": true,
+
+  // Classic bootstrap. Confirm the log: useExecServer = false
+  "remote.SSH.useExecServer": false,
+
+  // Fail fast if the server bits are missing (do not wget forever).
+  "remote.SSH.localServerDownload": "off",
+
+  // true silently turns useLocalServer off. Windows ignores the UI.
+  "remote.SSH.remoteServerListenOnSocket": false,
+
+  // Harmless. Avoids lock files in the server install folder.
+  "remote.SSH.lockfilesInTmp": true,
+
+  // OTP login is slower than a key (default 15s).
+  "remote.SSH.connectTimeout": 60,
+
+  // Windows only — native OpenSSH optional feature.
+  "remote.SSH.path": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+
+  // Host alias must match the ssh config Host name.
+  "remote.SSH.remotePlatform": {
+    "airgapped-host": "linux"
+  }
+}

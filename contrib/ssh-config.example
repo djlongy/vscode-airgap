@@ -1,0 +1,32 @@
+# WHERE THIS GOES — operator laptop, NOT the remote host
+#   Unix/macOS:  ~/.ssh/config
+#   Windows:     C:\Users\youruser\.ssh\config
+# Merge ONE Host block. Replace the host / realm / user placeholders.
+# Unix after merge: mkdir -p ~/.ssh/sockets
+
+# Unix / macOS — ControlMaster reuses the OTP login (anti-replay).
+Host airgapped-host
+    HostName airgapped-host.example.realm
+    User youruser
+    Port 22
+    PreferredAuthentications gssapi-with-mic,keyboard-interactive,password
+    GSSAPIAuthentication yes
+    GSSAPIDelegateCredentials yes
+    PubkeyAuthentication no
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+    ServerAliveInterval 30
+    StrictHostKeyChecking accept-new
+
+# Windows — no ControlMaster. Reuse is useLocalServer in settings.json.
+Host airgapped-host
+    HostName airgapped-host.example.realm
+    User youruser
+    Port 22
+    PreferredAuthentications keyboard-interactive
+    PubkeyAuthentication no
+    GSSAPIAuthentication no
+    NumberOfPasswordPrompts 3
+    ServerAliveInterval 30
+    StrictHostKeyChecking accept-new
