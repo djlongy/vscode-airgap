@@ -3,16 +3,23 @@
 #   Windows:     C:\Users\youruser\.ssh\config
 # Merge ONE Host block. Replace the host / realm / user placeholders.
 # Unix after merge: mkdir -p ~/.ssh/sockets
+#
+# publickey is first so Remote-SSH extra channels skip the OTP prompt
+# once the key is in authorized_keys (or the realm SSH pubkey store).
+# keyboard-interactive stays as the fallback for first-time / OTP login.
+# Uncomment IdentityFile and point it at the matching private key.
 
-# Unix / macOS — ControlMaster reuses the OTP login (anti-replay).
+# Unix / macOS — ControlMaster reuses a session; pubkey skips OTP.
 Host airgapped-host
     HostName airgapped-host.example.realm
     User youruser
     Port 22
-    PreferredAuthentications gssapi-with-mic,keyboard-interactive,password
+    PreferredAuthentications publickey,gssapi-with-mic,keyboard-interactive,password
+    PubkeyAuthentication yes
+    # IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly no
     GSSAPIAuthentication yes
     GSSAPIDelegateCredentials yes
-    PubkeyAuthentication no
     ControlMaster auto
     ControlPath ~/.ssh/sockets/%r@%h-%p
     ControlPersist 600
@@ -24,8 +31,10 @@ Host airgapped-host
     HostName airgapped-host.example.realm
     User youruser
     Port 22
-    PreferredAuthentications keyboard-interactive
-    PubkeyAuthentication no
+    PreferredAuthentications publickey,keyboard-interactive
+    PubkeyAuthentication yes
+    # IdentityFile C:\Users\youruser\.ssh\id_ed25519
+    IdentitiesOnly no
     GSSAPIAuthentication no
     NumberOfPasswordPrompts 3
     ServerAliveInterval 30

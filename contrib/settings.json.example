@@ -6,10 +6,16 @@
   // Merge these keys (JSONC: // comments are fine). UTF-8, no BOM.
   // Omit remote.SSH.path on Unix.
 
-  // So the password + TOTP prompts are visible.
+  // Shared/custom server tree. Host alias must match ssh config Host.
+  // --link-home also satisfies the presence test without this key.
+  "remote.SSH.serverInstallPath": {
+    "airgapped-host": "/opt/vscode-server"
+  },
+
+  // So the password + TOTP prompts are visible (first connect / no key).
   "remote.SSH.showLoginTerminal": true,
 
-  // Reuse the OTP login. Required on Windows (no ControlMaster).
+  // Reuse the SSH login. Required on Windows (no ControlMaster).
   "remote.SSH.useLocalServer": true,
 
   // Classic bootstrap. Confirm the log: useExecServer = false
@@ -24,7 +30,7 @@
   // Harmless. Avoids lock files in the server install folder.
   "remote.SSH.lockfilesInTmp": true,
 
-  // OTP login is slower than a key (default 15s).
+  // First OTP login is slower than a key (default 15s).
   "remote.SSH.connectTimeout": 60,
 
   // Windows only — native OpenSSH optional feature.

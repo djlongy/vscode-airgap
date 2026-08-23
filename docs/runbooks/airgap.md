@@ -74,12 +74,22 @@ allows — out of scope for this script.
 
 ## 2. On the air-gapped host: install with network blocked
 
-Run this **logged in as the exact user account Remote-SSH will connect
-as** — the install path (`~/.vscode-server`) is per-user, and that's
-the whole point: it has to be the account the SSH session lands in.
-Offline install writes both layouts (classic `bin/<commit>/` and
-exec-server `code-<commit>` + `cli/servers/Stable-<commit>/server/`)
-plus the handshake tarball.
+Per-user install (default): log in as the Remote-SSH user and leave
+`--install-dir` at `~/.vscode-server`.
+
+Shared install (fapolicyd / CIS / multi-user): run **as root** with
+`--install-dir /opt/vscode-server --link-home --user <ssh-user>
+--install-fapolicyd`. This is the path that survives a host where
+`/tmp` is `noexec` and fapolicyd denies execute from `$HOME` and
+`/tmp` (Remote-SSH's defaults). Binaries live once under
+`/opt/vscode-server` (world-readable). `--link-home` puts the
+Remote-SSH presence-test files in that user's `~/.vscode-server` as
+**symlinks**; `data/`, `extensions/`, and the per-commit `.token`
+stay real files in home so sessions do not share a token. A binary
+copied into `$HOME` stays denied — only the `/opt` tree (and
+symlinks whose real path is `/opt`) execute. Offline install writes both layouts
+(classic `bin/<commit>/` and exec-server `code-<commit>` +
+`cli/servers/Stable-<commit>/server/`) plus the handshake tarball.
 
 The script never calls `curl` in `--mode offline` — there's nothing to
 disable. To *prove* that during testing, run with network genuinely cut:

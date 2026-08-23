@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # vscode-airgap.sh — stage a Remote-SSH connection to an air-gapped Linux
-# host: pre-install the exact VS Code Server commit at ~/.vscode-server so
-# the client never needs to download it, plus matching client installers
-# (Linux + Windows) so Help > About reports the same commit. Also supports
-# Microsoft's Remote Tunnels and `code serve-web` as secondary, online-only
-# / optional paths.
+# host: pre-install the exact VS Code Server commit so the client never
+# needs to download it, plus matching client installers (Linux + Windows)
+# so Help > About reports the same commit. Default install is
+# ~/.vscode-server (what Remote-SSH looks for). Pass --install-dir
+# /opt/vscode-server for a shared, fapolicyd-allowable location and
+# --link-home so each user's ~/.vscode-server presence tests still pass.
+# Also supports Microsoft's Remote Tunnels and `code serve-web` as
+# secondary, online-only / optional paths.
 #
 # See docs/reference/download-urls.md for the exact endpoints this uses,
 # docs/runbooks/ for online-vs-airgap and realm+OTP SSH walkthroughs, and
@@ -17,9 +20,11 @@ readonly SELF
 readonly UPDATE_HOST="https://update.code.visualstudio.com"
 readonly MARKETPLACE_HOST="https://marketplace.visualstudio.com"
 readonly DEFAULT_INSTALL_DIR="${HOME}/.vscode-server"
+readonly DEFAULT_SHARED_INSTALL_DIR="/opt/vscode-server"
 readonly DEFAULT_BIND_ADDR="127.0.0.1"
 readonly DEFAULT_PORT="8000"
 readonly DEFAULT_SERVER_ARCH="linux-x64"
+readonly DEFAULT_FAPOLICYD_PRIORITY="25"
 readonly VSCODE_GIT_REPO="https://github.com/microsoft/vscode.git"
 readonly DEFAULT_TAG_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vscode-airgap"
 readonly DEFAULT_TAG_CACHE_TTL="86400"   # 24h — tags don't change often enough to justify refetching every run
@@ -37,10 +42,15 @@ TOKEN="${TOKEN:-}"
 EXTENSIONS="${EXTENSIONS:-}"
 EXTENSIONS_FILE="${EXTENSIONS_FILE:-}"
 BUNDLE_PATH="${BUNDLE_PATH:-}"
-ACTION="install"          # install (default) | tunnel | status | emit-ssh-config | list-versions
+ACTION="install"          # install (default) | tunnel | status | emit-ssh-config | list-versions | link-home | install-fapolicyd
 START_AFTER_INSTALL=0     # serve-web only starts if --serve-web is also given
 DOWNLOAD_ONLY=0
 FORCE=0
+SHARED="${SHARED:-0}"     # world-readable tree; auto-on when INSTALL_DIR is not under $HOME
+LINK_HOME="${LINK_HOME:-0}"
+LINK_USERS="${LINK_USERS:-}"
+INSTALL_FAPOLICYD="${INSTALL_FAPOLICYD:-0}"
+FAPOLICYD_PRIORITY="${FAPOLICYD_PRIORITY:-$DEFAULT_FAPOLICYD_PRIORITY}"
 WITH_SERVE_WEB=0          # --serve-web: also fetch+optionally start code serve-web
 WITH_CLI=0                # implied by --serve-web or --tunnel
 LIST_VERSIONS="${LIST_VERSIONS:-0}"
@@ -74,13 +84,17 @@ vscode-airgap.sh — stage VS Code Remote-SSH for an air-gapped Linux host
 Primary path: pre-install the exact VS Code Server commit on the
 air-gapped host so Remote-SSH finds a matching install and never tries
 to download one over the wire. Stages BOTH layouts the client may pick
-(classic ~/.vscode-server/bin/<commit>/ AND exec-server
-~/.vscode-server/code-<commit> plus cli/servers/Stable-<commit>/server/)
+(classic INSTALL_DIR/bin/<commit>/ AND exec-server
+INSTALL_DIR/code-<commit> plus cli/servers/Stable-<commit>/server/)
 plus matching Linux/Windows client installers so Help > About reports
-the same commit. Connects over plain SSH port 22 with realm
-(GSSAPI/Kerberos) + OTP auth — see
-docs/runbooks/remote-ssh-realm-otp.md. `code serve-web` and Remote Tunnels
-are supported as secondary, opt-in paths (--serve-web / --tunnel).
+the same commit. INSTALL_DIR defaults to ~/.vscode-server. For a
+shared install that fapolicyd can allow-list, use
+--install-dir /opt/vscode-server (world-readable; then --link-home so
+Remote-SSH's per-user presence tests still pass). Connects over plain
+SSH port 22 with pubkey (skips repeated OTP) and realm/OTP as fallback
+— see docs/runbooks/remote-ssh-realm-otp.md. `code serve-web` and
+Remote Tunnels are supported as secondary, opt-in paths
+(--serve-web / --tunnel).
 
 USAGE
   vscode-airgap.sh --mode online   [options]   # internet-connected host
@@ -88,6 +102,8 @@ USAGE
   vscode-airgap.sh --mode offline  [options]   # air-gapped host: install from a bundle
   vscode-airgap.sh --emit-ssh-config [--install-dir DIR]
   vscode-airgap.sh --status [--install-dir DIR]
+  vscode-airgap.sh --link-home [--user NAME] [--install-dir DIR]
+  vscode-airgap.sh --install-fapolicyd [--install-dir DIR]
   vscode-airgap.sh --list-versions [--limit N|--all] [--format text|json] [--refresh]
   vscode-airgap.sh --help
 
@@ -103,7 +119,10 @@ MODES
             cli/servers/Stable-<commit>/server/ (exec-server), plus the
             handshake tarball vscode-cli-<commit>.tar.gz with its
             sibling .done written last. INSTALL_DIR defaults to
-            ~/.vscode-server — the real path Remote-SSH itself uses.
+            ~/.vscode-server. A path not under $HOME (typically
+            /opt/vscode-server) is treated as shared: world-readable
+            so every Remote-SSH user can execute it, and fapolicyd
+            can allow-list one directory instead of every $HOME.
             Stage the client installers + extension VSIX for the
             operator to pick up. Add --serve-web to also
             fetch+start `code serve-web`, or --tunnel for real Remote
@@ -184,11 +203,14 @@ OPTIONS (env var equivalents in parentheses)
                           NOT affect the client installers, which are
                           always Linux x64 + Windows x64 regardless of
                           --arch. (ARCH)
-  --install-dir DIR       Default: ~/.vscode-server — deliberately the
-                          SAME path Remote-SSH uses on its own. Leave it at
-                          the default on the actual air-gapped host/user
-                          Remote-SSH will connect as; override only for
-                          testing. (INSTALL_DIR)
+  --install-dir DIR       Where the server tree is written.
+                          Default: ~/.vscode-server (what Remote-SSH
+                          looks for). Set /opt/vscode-server (or any
+                          path not under $HOME) for a shared install
+                          every user can execute; fapolicyd then
+                          allow-lists that one directory. Pair with
+                          --link-home so ~/.vscode-server still has
+                          the presence-test files. (INSTALL_DIR)
   --bundle-path PATH      Bundle tarball: output path (mode=bundle) or
                           input path (mode=offline). (BUNDLE_PATH)
   --extensions LIST       Comma-separated publisher.name IDs. (EXTENSIONS)
@@ -222,14 +244,39 @@ OPTIONS (env var equivalents in parentheses)
   --download-only         Fetch/verify artifacts but do not install/start.
   --status                Print install state for INSTALL_DIR and exit.
                           Standalone — no MODE/network/curl required.
-  --emit-ssh-config       Write three templates into INSTALL_DIR and
+  --emit-ssh-config       Write four templates into INSTALL_DIR and
                           print where each one is copied (laptop
                           ~/.ssh/config, laptop VS Code user
-                          settings.json, this host's sshd drop-in).
-                          JSONC // comments, not fake "// key" pairs.
+                          settings.json, this host's sshd drop-in,
+                          fapolicyd rules.d snippet). JSONC //
+                          comments, not fake "// key" pairs.
                           Standalone — no MODE/network required.
+  --shared                Force world-readable modes on INSTALL_DIR
+                          (0755 dirs/bins, 0644 files). Implied when
+                          INSTALL_DIR is not under $HOME. (SHARED=1)
+  --link-home             After install, or standalone: symlink
+                          Remote-SSH presence-test paths from
+                          ~/.vscode-server (or --user's home) to
+                          INSTALL_DIR. User-writable state (data,
+                          extensions, the per-commit .token) stays
+                          in the home tree. (LINK_HOME=1)
+  --user NAME             With --link-home: operate on NAME's home
+                          instead of $HOME. Repeatable / comma-list
+                          via --link-users. Root required for another
+                          user. (LINK_USERS)
+  --link-users LIST       Comma-separated user names for --link-home.
+  --install-fapolicyd     As root: write
+                          /etc/fapolicyd/rules.d/<priority>-vscode-server.rules
+                          allowing dir=INSTALL_DIR/, then
+                          fagenrules --load and restart fapolicyd.
+                          Standalone, or with --mode. fapolicyd must
+                          already be installed. (INSTALL_FAPOLICYD=1)
+  --fapolicyd-priority N  rules.d filename prefix, default 25 (before
+                          the 30-patterns.rules ld_so deny and the 90
+                          catch-all). (FAPOLICYD_PRIORITY)
   --force                 Re-download even if a matching cached artifact
-                          already exists.
+                          already exists. With --link-home: replace a
+                          real presence-test path with a symlink.
   -h, --help              This text.
 
 PROXY
@@ -247,12 +294,14 @@ EXAMPLES
     ./vscode-airgap.sh --mode bundle --bundle-path ./vscode-bundle.tar.gz \
     --extensions ms-python.python
 
-  # Carry vscode-bundle.tar.gz to the air-gapped host, log in as the SAME
-  # user Remote-SSH will connect as, then:
-  ./vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz
+  # Carry vscode-bundle.tar.gz to the air-gapped host. Shared install
+  # (as root), then per-user presence-test links:
+  sudo ./vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz \
+    --install-dir /opt/vscode-server --link-home --user youruser \
+    --install-fapolicyd
 
-  # Print ssh_config + JSONC settings.json + remote-host notes
-  ./vscode-airgap.sh --emit-ssh-config
+  # Print ssh_config + JSONC settings.json + sshd drop-in + fapolicyd rule
+  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server
 
   # Optional secondary path: serve-web instead of / alongside Remote-SSH
   ./vscode-airgap.sh --mode online --serve-web
@@ -284,11 +333,16 @@ LIMITATIONS — READ THIS BEFORE CHOOSING --tunnel OR --serve-web
   required: a staging miss otherwise wget -O truncates the CLI tarball
   to zero bytes and the install script polls forever. The fail-closed
   mechanism is what this script does: pre-stage BOTH Remote-SSH layouts
-  (classic ~/.vscode-server/bin/<commit>/ AND exec-server
-  ~/.vscode-server/code-<commit> plus
-  cli/servers/Stable-<commit>/server/) BEFORE the first connection, so
-  whichever bootstrap script arrives, its presence test passes and the
-  download branch is never entered. Also set
+  BEFORE the first connection, so whichever bootstrap script arrives,
+  its presence test passes and the download branch is never entered.
+
+  CIS/STIG hosts commonly mount /tmp noexec AND run fapolicyd, which
+  denies execute from $HOME and /tmp (Remote-SSH's default write
+  locations). Put INSTALL_DIR at /opt/vscode-server, allow-list that
+  one directory in fapolicyd (--install-fapolicyd), and --link-home so
+  the presence tests in ~/.vscode-server are symlinks to /opt. A
+  HOME or /tmp install will fail with "Operation not permitted" or
+  exec format error (126). Also set
   remote.SSH.remoteServerListenOnSocket: false in settings.json —
   true silently forces useLocalServer off (Windows ignores the UI
   toggle). See docs/runbooks/remote-ssh-realm-otp.md.
@@ -319,6 +373,27 @@ while [ $# -gt 0 ]; do
     --limit) LIST_LIMIT="$2"; shift 2 ;;
     --all) LIST_LIMIT=0; shift ;;
     --format) LIST_FORMAT="$2"; shift 2 ;;
+    --shared) SHARED=1; shift ;;
+    --link-home)
+      LINK_HOME=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
+        shift
+      fi
+      shift
+      ;;
+    --user)
+      LINK_HOME=1
+      LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
+      shift 2
+      ;;
+    --link-users)
+      LINK_HOME=1
+      LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
+      shift 2
+      ;;
+    --install-fapolicyd) INSTALL_FAPOLICYD=1; shift ;;
+    --fapolicyd-priority) FAPOLICYD_PRIORITY="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --refresh) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -329,22 +404,32 @@ done
 [ "$LIST_VERSIONS" = "1" ] && ACTION="list-versions"
 case "$LIST_FORMAT" in text|json) ;; *) die "invalid --format '$LIST_FORMAT' (text|json)" ;; esac
 
-# --status / --emit-ssh-config / --list-versions are standalone queries
-# that never require --mode. --list-versions is NOT network-free like the
-# other two (unless --bundle-path is given) — see the dependency block
-# below for its own, narrower requirements.
-if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] || [ "$ACTION" = "list-versions" ]; then
+# --status / --emit-ssh-config / --list-versions / --link-home /
+# --install-fapolicyd are standalone queries that never require --mode
+# (link-home and install-fapolicyd also run AFTER a --mode install when
+# given together). --list-versions is NOT network-free like the others
+# (unless --bundle-path is given) — see the dependency block below.
+if [ -z "$MODE" ] && [ "$ACTION" = "install" ]; then
+  if [ "$LINK_HOME" = "1" ]; then
+    ACTION="link-home"
+  elif [ "$INSTALL_FAPOLICYD" = "1" ]; then
+    ACTION="install-fapolicyd"
+  fi
+fi
+if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] || [ "$ACTION" = "list-versions" ] \
+    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ]; then
   STANDALONE_ACTION=1
 else
   STANDALONE_ACTION=0
-  [ -n "$MODE" ] || { usage; die "MODE / --mode is required (online|bundle|offline)"; }
+  [ -n "$MODE" ] || { usage; die "MODE / --mode is required (online|bundle|offline)" ; }
   case "$MODE" in online|bundle|offline) ;; *) die "invalid --mode '$MODE' (online|bundle|offline)" ;; esac
   case "$CHANNEL" in stable|insider) ;; *) die "invalid --channel '$CHANNEL' (stable|insider)" ;; esac
 fi
 
 # ── Dependency check ─────────────────────────────────────────────────────
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
-if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ]; then
+if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] \
+    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ]; then
   : # genuinely zero deps beyond bash/coreutils, by design
 elif [ "$ACTION" = "list-versions" ]; then
   if [ -z "$BUNDLE_PATH" ]; then
@@ -1301,6 +1386,169 @@ json_field() {
     || sed -n "s/.*\"$field\":[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$file" | head -1
 }
 
+# ── Shared vs per-user install helpers ─────────────────────────────────
+_norm_path() { printf '%s' "$1" | sed 's:/*$::'; }
+
+is_home_install() {
+  [ "$(_norm_path "$INSTALL_DIR")" = "$(_norm_path "${HOME}/.vscode-server")" ]
+}
+
+want_shared() {
+  [ "$SHARED" = "1" ] && return 0
+  case "$(_norm_path "$INSTALL_DIR")" in
+    "$HOME"|"$HOME"/*|/home/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+handshake_mode() {
+  if want_shared; then
+    printf '0644'
+  else
+    printf '0640'
+  fi
+}
+
+apply_shared_perms() {
+  local root="$1"
+  [ -d "$root" ] || return 0
+  want_shared || return 0
+  log "shared install: world-readable modes under $root"
+  chmod 0755 "$root"
+  # data/ and extensions/ are per-user state — never chmod those even if
+  # someone created them under a shared tree.
+  find "$root" \( -path "$root/data" -o -path "$root/data/*" \
+      -o -path "$root/extensions" -o -path "$root/extensions/*" \) -prune -o \
+    -type d -exec chmod 0755 {} +
+  find "$root" \( -path "$root/data" -o -path "$root/data/*" \
+      -o -path "$root/extensions" -o -path "$root/extensions/*" \) -prune -o \
+    -type f -perm -u+x -exec chmod 0755 {} +
+  find "$root" \( -path "$root/data" -o -path "$root/data/*" \
+      -o -path "$root/extensions" -o -path "$root/extensions/*" \) -prune -o \
+    -type f ! -perm -u+x -exec chmod 0644 {} +
+}
+
+user_home_of() {
+  local user="$1" home
+  if [ -z "$user" ] || [ "$user" = "$(id -un)" ]; then
+    printf '%s' "$HOME"
+    return
+  fi
+  home="$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6}')"
+  [ -n "$home" ] || die "no passwd entry for user '$user'"
+  printf '%s' "$home"
+}
+
+# Symlink Remote-SSH presence-test files from dest_root to INSTALL_DIR.
+# Leaves data/, extensions/, .*.token, logs as real files in dest_root.
+link_one_user() {
+  local user="$1"
+  local dest_root src commit dest
+  src="$(_norm_path "$INSTALL_DIR")"
+  dest_root="$(user_home_of "$user")/.vscode-server"
+  if [ "$src" = "$(_norm_path "$dest_root")" ]; then
+    log "link-home: $user already uses $src as INSTALL_DIR — nothing to link"
+    return 0
+  fi
+  [ -d "$src" ] || die "INSTALL_DIR does not exist: $src (install first)"
+  if [ ! -f "$src/versions.json" ]; then
+    die "no versions.json at $src — not a vscode-airgap install"
+  fi
+  commit="$(json_field "$src/versions.json" commit)"
+  [ -n "$commit" ] || die "versions.json at $src has no commit"
+  mkdir -p "$dest_root/bin" "$dest_root/cli/servers"
+
+  _link_replace() {
+    local from="$1" to="$2"
+    if [ -L "$to" ]; then
+      local cur
+      cur="$(readlink "$to")"
+      if [ "$cur" = "$from" ]; then
+        return 0
+      fi
+      rm -f "$to"
+    elif [ -e "$to" ]; then
+      if [ "$FORCE" = "1" ]; then
+        rm -rf "$to"
+      else
+        die "refusing to replace $to (already exists). Pass --force to replace with a symlink to $from"
+      fi
+    fi
+    ln -s "$from" "$to"
+  }
+
+  [ -d "$src/bin/$commit" ] && _link_replace "$src/bin/$commit" "$dest_root/bin/$commit"
+  [ -e "$src/code-$commit" ] && _link_replace "$src/code-$commit" "$dest_root/code-$commit"
+  [ -d "$src/cli/servers/Stable-$commit" ] \
+    && _link_replace "$src/cli/servers/Stable-$commit" "$dest_root/cli/servers/Stable-$commit"
+  [ -e "$src/vscode-cli-$commit.tar.gz" ] \
+    && _link_replace "$src/vscode-cli-$commit.tar.gz" "$dest_root/vscode-cli-$commit.tar.gz"
+  [ -e "$src/vscode-cli-$commit.tar.gz.done" ] \
+    && _link_replace "$src/vscode-cli-$commit.tar.gz.done" "$dest_root/vscode-cli-$commit.tar.gz.done"
+  [ -f "$src/versions.json" ] && _link_replace "$src/versions.json" "$dest_root/versions.json"
+  log "linked Remote-SSH presence tests for $user: $dest_root -> $src (commit ${commit:0:12}...)"
+}
+
+run_link_home() {
+  local users="$LINK_USERS" u
+  if [ -z "$users" ]; then
+    users="$(id -un)"
+  fi
+  IFS=', ' read -r -a _link_arr <<< "$users"
+  for u in "${_link_arr[@]}"; do
+    [ -n "$u" ] || continue
+    if [ "$u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+      die "--user $u requires root"
+    fi
+    link_one_user "$u"
+  done
+}
+
+write_fapolicyd_example() {
+  local dir="$(_norm_path "$INSTALL_DIR")"
+  case "$dir" in
+    */) ;;
+    *) dir="${dir}/" ;;
+  esac
+  cat <<EOF
+# WHERE THIS GOES — THIS Linux host as root
+#   /etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules
+#   then: fagenrules --load && systemctl restart fapolicyd
+#
+# fapolicyd denies executing files not in the rpm trust db. VS Code Server
+# is a tarball extract, so it is untrusted until allow-listed. A HOME
+# allow-rule is the wrong shape on a multi-user host (every home, and
+# anything a user drops in it). Point INSTALL_DIR at a shared path
+# (default recommendation: /opt/vscode-server) and allow that directory.
+#
+# Priority ${FAPOLICYD_PRIORITY} lands before 30-patterns.rules (ld_so) and
+# 90-deny-execute.rules. Trailing slash on dir= is required.
+
+allow perm=any all : dir=${dir}
+EOF
+}
+
+run_install_fapolicyd() {
+  [ "$(id -u)" -eq 0 ] || die "--install-fapolicyd requires root"
+  [ -d /etc/fapolicyd/rules.d ] || die "fapolicyd is not installed (missing /etc/fapolicyd/rules.d)"
+  local dir dest
+  dir="$(_norm_path "$INSTALL_DIR")"
+  [ -d "$dir" ] || die "INSTALL_DIR does not exist: $dir (install the server first)"
+  dest="/etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
+  write_fapolicyd_example > "$dest"
+  chmod 0644 "$dest"
+  log "wrote $dest"
+  if command -v fagenrules >/dev/null 2>&1; then
+    fagenrules --load
+  else
+    warn "fagenrules not on PATH — restarting fapolicyd anyway"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart fapolicyd
+  fi
+  log "fapolicyd allow-lists dir=${dir}/"
+}
+
 # ── Shared install step (used by online + offline) ───────────────────────
 install_from_stage() {
   local stage_dir="$1"
@@ -1387,14 +1635,14 @@ install_from_stage() {
     local exec_cli="$INSTALL_DIR/code-${commit}"
     log "staging CLI archive for Remote-SSH bootstrap at $remote_cli_archive"
     cp -f "$handshake_src" "$remote_cli_archive"
-    chmod 640 "$remote_cli_archive" 2>/dev/null || chmod 600 "$remote_cli_archive"
+    chmod "$(handshake_mode)" "$remote_cli_archive"
     if [ ! -x "$exec_cli" ]; then
       tar -xOf "$handshake_src" code > "$exec_cli" \
         || die "could not extract CLI binary 'code' from $handshake_src"
       chmod 0755 "$exec_cli"
     fi
     : > "${remote_cli_archive}.done"
-    chmod 640 "${remote_cli_archive}.done" 2>/dev/null || chmod 600 "${remote_cli_archive}.done"
+    chmod "$(handshake_mode)" "${remote_cli_archive}.done"
   fi
   if [ -f "$stage_dir/server-web.tar.gz" ]; then
     mkdir -p "$INSTALL_DIR/server-web"
@@ -1415,7 +1663,19 @@ install_from_stage() {
   fi
 
   cp -f "$stage_dir/versions.json" "$INSTALL_DIR/versions.json"
+  apply_shared_perms "$INSTALL_DIR"
   log "install complete. versions: $INSTALL_DIR/versions.json"
+  if want_shared && [ "$LINK_HOME" != "1" ]; then
+    log "INSTALL_DIR is not ~/.vscode-server. Remote-SSH still looks there unless you"
+    log "  set remote.SSH.serverInstallPath (emitted in settings.json) OR run:"
+    log "  $SELF --link-home --install-dir $INSTALL_DIR [--user NAME]"
+  fi
+  if [ "$LINK_HOME" = "1" ]; then
+    run_link_home
+  fi
+  if [ "$INSTALL_FAPOLICYD" = "1" ]; then
+    run_install_fapolicyd
+  fi
 
   if [ "$DOWNLOAD_ONLY" -eq 1 ]; then
     log "--download-only set: not starting anything"
@@ -1523,9 +1783,11 @@ run_emit_ssh_config() {
   local ssh_out="$INSTALL_DIR/ssh-config.example"
   local settings_out="$INSTALL_DIR/settings.json.example"
   local remote_out="$INSTALL_DIR/remote-host.example"
+  local fapo_out="$INSTALL_DIR/fapolicyd-vscode.rules"
   write_ssh_config_example > "$ssh_out"
   write_settings_json_example > "$settings_out"
   write_remote_host_example > "$remote_out"
+  write_fapolicyd_example > "$fapo_out"
   log "wrote templates under $INSTALL_DIR"
   log "These are NOT live. Copy/merge each file to the path below."
   log ""
@@ -1534,7 +1796,7 @@ run_emit_ssh_config() {
   log "    Unix/macOS ->  ~/.ssh/config"
   log "    Windows    ->  C:\\Users\\youruser\\.ssh\\config"
   log "    HOW:  merge ONE Host block (Unix or Windows), replace"
-  log "          airgapped-host / youruser / the hostname"
+  log "          airgapped-host / youruser / the hostname / IdentityFile"
   log ""
   log "  $settings_out"
   log "    WHO:  operator laptop (not this host)"
@@ -1550,6 +1812,12 @@ run_emit_ssh_config() {
   log "    WHO:  THIS Linux host, as root (not the laptop)"
   log "    PUT:  /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf"
   log "    HOW:  copy the file, then sshd -t && systemctl reload sshd"
+  log ""
+  log "  $fapo_out"
+  log "    WHO:  THIS Linux host, as root, if fapolicyd is enforcing"
+  log "    PUT:  /etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
+  log "    HOW:  copy, then fagenrules --load && systemctl restart fapolicyd"
+  log "          or: $SELF --install-fapolicyd --install-dir $INSTALL_DIR"
 }
 
 write_ssh_config_example() {
@@ -1559,16 +1827,23 @@ write_ssh_config_example() {
 #   Windows:     C:\Users\youruser\.ssh\config
 # Merge ONE Host block. Replace the host / realm / user placeholders.
 # Unix after merge: mkdir -p ~/.ssh/sockets
+#
+# publickey is first so Remote-SSH extra channels skip the OTP prompt
+# once the key is in authorized_keys (or the realm SSH pubkey store).
+# keyboard-interactive stays as the fallback for first-time / OTP login.
+# Uncomment IdentityFile and point it at the matching private key.
 
-# Unix / macOS — ControlMaster reuses the OTP login (anti-replay).
+# Unix / macOS — ControlMaster reuses a session; pubkey skips OTP.
 Host airgapped-host
     HostName airgapped-host.example.realm
     User youruser
     Port 22
-    PreferredAuthentications gssapi-with-mic,keyboard-interactive,password
+    PreferredAuthentications publickey,gssapi-with-mic,keyboard-interactive,password
+    PubkeyAuthentication yes
+    # IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly no
     GSSAPIAuthentication yes
     GSSAPIDelegateCredentials yes
-    PubkeyAuthentication no
     ControlMaster auto
     ControlPath ~/.ssh/sockets/%r@%h-%p
     ControlPersist 600
@@ -1580,8 +1855,10 @@ Host airgapped-host
     HostName airgapped-host.example.realm
     User youruser
     Port 22
-    PreferredAuthentications keyboard-interactive
-    PubkeyAuthentication no
+    PreferredAuthentications publickey,keyboard-interactive
+    PubkeyAuthentication yes
+    # IdentityFile C:\Users\youruser\.ssh\id_ed25519
+    IdentitiesOnly no
     GSSAPIAuthentication no
     NumberOfPasswordPrompts 3
     ServerAliveInterval 30
@@ -1593,19 +1870,32 @@ write_settings_json_example() {
   # VS Code settings.json is JSONC. Comments are // lines, never
   # fake keys like "// useLocalServer": "…". Those are real JSON
   # properties the extension will ignore or reject.
-  cat <<'EOF'
+  local install_json extra=""
+  install_json="$(_norm_path "$INSTALL_DIR")"
+  if ! is_home_install; then
+    extra=$(cat <<EOF
+
+  // Shared/custom server tree. Host alias must match ssh config Host.
+  // --link-home also satisfies the presence test without this key.
+  "remote.SSH.serverInstallPath": {
+    "airgapped-host": "${install_json}"
+  },
+EOF
+)
+  fi
+  cat <<EOF
 {
   // WHERE THIS GOES — operator laptop, NOT the remote host
-  //   Windows:  %APPDATA%\Code\User\settings.json
+  //   Windows:  %APPDATA%\\Code\\User\\settings.json
   //   macOS:    ~/Library/Application Support/Code/User/settings.json
   //   Linux:    ~/.config/Code/User/settings.json
   // Merge these keys (JSONC: // comments are fine). UTF-8, no BOM.
   // Omit remote.SSH.path on Unix.
-
-  // So the password + TOTP prompts are visible.
+${extra}
+  // So the password + TOTP prompts are visible (first connect / no key).
   "remote.SSH.showLoginTerminal": true,
 
-  // Reuse the OTP login. Required on Windows (no ControlMaster).
+  // Reuse the SSH login. Required on Windows (no ControlMaster).
   "remote.SSH.useLocalServer": true,
 
   // Classic bootstrap. Confirm the log: useExecServer = false
@@ -1620,11 +1910,11 @@ write_settings_json_example() {
   // Harmless. Avoids lock files in the server install folder.
   "remote.SSH.lockfilesInTmp": true,
 
-  // OTP login is slower than a key (default 15s).
+  // First OTP login is slower than a key (default 15s).
   "remote.SSH.connectTimeout": 60,
 
   // Windows only — native OpenSSH optional feature.
-  "remote.SSH.path": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+  "remote.SSH.path": "C:\\\\Windows\\\\System32\\\\OpenSSH\\\\ssh.exe",
 
   // Host alias must match the ssh config Host name.
   "remote.SSH.remotePlatform": {
@@ -1640,10 +1930,16 @@ write_remote_host_example() {
 #   /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf
 #   then: sshd -t && systemctl reload sshd
 #
-# Makes sshd accept password+OTP and allow Remote-SSH forwarding.
-# First Factor = password. Second Factor = TOTP (not the password again).
+# Pubkey first (sshd default is already yes — this drop-in makes it
+# explicit). A key in ~/.ssh/authorized_keys OR the realm's SSH pubkey
+# store authenticates extra Remote-SSH channels without a TOTP prompt.
+# keyboard-interactive stays on so first-time / OTP login still works.
+# Do NOT set AuthenticationMethods to keyboard-interactive only — that
+# is what forces the token prompt on every channel.
 # remote.SSH.* keys do not go here.
 
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 UsePAM yes
@@ -1662,6 +1958,14 @@ if [ "$ACTION" = "status" ]; then
 fi
 if [ "$ACTION" = "emit-ssh-config" ]; then
   run_emit_ssh_config
+  exit 0
+fi
+if [ "$ACTION" = "link-home" ]; then
+  run_link_home
+  exit 0
+fi
+if [ "$ACTION" = "install-fapolicyd" ]; then
+  run_install_fapolicyd
   exit 0
 fi
 if [ "$ACTION" = "list-versions" ]; then

@@ -7,7 +7,7 @@ protocol. This script's job is getting the right server bits onto the
 remote host *before* the first connection so nothing tries to download
 anything mid-session.
 
-`--emit-ssh-config` writes three **templates** (also under `contrib/`).
+`--emit-ssh-config` writes four **templates** (also under `contrib/`).
 They are not live until you copy them:
 
 | Template | Who | Put it here |
@@ -15,6 +15,7 @@ They are not live until you copy them:
 | `ssh-config.example` | operator laptop | Unix/macOS: `~/.ssh/config` · Windows: `C:\Users\youruser\.ssh\config` |
 | `settings.json.example` | operator laptop | Windows: `%APPDATA%\Code\User\settings.json` · macOS: `~/Library/Application Support/Code/User/settings.json` · Linux: `~/.config/Code/User/settings.json` |
 | `remote-host.example` | air-gapped host (root) | `/etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf` |
+| `fapolicyd-vscode.rules` | air-gapped host (root) | `/etc/fapolicyd/rules.d/25-vscode-server.rules` (or `$SELF --install-fapolicyd`) |
 
 `settings.json.example` is **JSONC**: comments are `//` lines. Do **not**
 comment with fake keys such as `"// useLocalServer": "…"`. Those are
@@ -26,18 +27,23 @@ real JSON properties, not comments.
 ./bin/vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz
 ```
 
-Run this **as the same user account** Remote-SSH will connect as, with
-`--install-dir` left at its default (`~/.vscode-server`). The bootstrap
-script the client runs is chosen by a staged rollout, not by extension
-version, so the install puts **both** layouts on disk:
+Per-user: run as the Remote-SSH account, `--install-dir` default
+(`~/.vscode-server`). Shared: run as root with
+`--install-dir /opt/vscode-server --link-home --user <ssh-user>`.
+The bootstrap script the client runs is chosen by a staged rollout, not
+by extension version, so the install puts **both** layouts on disk:
 
 ```
-~/.vscode-server/bin/<commit>/                 # classic
-~/.vscode-server/code-<commit>                 # exec-server CLI binary
-~/.vscode-server/cli/servers/Stable-<commit>/server/
-~/.vscode-server/vscode-cli-<commit>.tar.gz    # handshake archive
-~/.vscode-server/vscode-cli-<commit>.tar.gz.done   # written LAST
+INSTALL_DIR/bin/<commit>/                 # classic
+INSTALL_DIR/code-<commit>                 # exec-server CLI binary
+INSTALL_DIR/cli/servers/Stable-<commit>/server/
+INSTALL_DIR/vscode-cli-<commit>.tar.gz    # handshake archive
+INSTALL_DIR/vscode-cli-<commit>.tar.gz.done   # written LAST
 ```
+
+`--link-home` then points the same paths under `~/.vscode-server` at
+INSTALL_DIR (symlinks). Per-user `data/`, `extensions/`, and `.token`
+stay in home.
 
 Classic contents: `node`, `bin/code-server`,
 `bin/helpers/check-requirements.sh` (executable), `out/server-main.js`,
@@ -82,10 +88,11 @@ separate `Host` blocks in that file.
 Unix / macOS:
 
 ```
-PreferredAuthentications gssapi-with-mic,keyboard-interactive,password
+PreferredAuthentications publickey,gssapi-with-mic,keyboard-interactive,password
+PubkeyAuthentication yes
+# IdentityFile ~/.ssh/id_ed25519
 GSSAPIAuthentication yes
 GSSAPIDelegateCredentials yes
-PubkeyAuthentication no
 ControlMaster auto
 ControlPath ~/.ssh/sockets/%r@%h-%p
 ControlPersist 600
@@ -94,17 +101,17 @@ ControlPersist 600
 Windows (native OpenSSH optional feature):
 
 ```
-PreferredAuthentications keyboard-interactive
-PubkeyAuthentication no
+PreferredAuthentications publickey,keyboard-interactive
+PubkeyAuthentication yes
 GSSAPIAuthentication no
 NumberOfPasswordPrompts 3
 ```
 
-- **Realm first, OTP as the interactive fallback.** `gssapi-with-mic`
-  lets an existing Kerberos ticket (`kinit`) authenticate without a
-  prompt; `keyboard-interactive` carries the OTP challenge when the
-  realm alone isn't enough. Pubkey can be turned off (`PubkeyAuthentication
-  no`) if policy forbids keys. Auth method selection lives in
+- **Pubkey first, so extra Remote-SSH channels skip the OTP prompt.**
+  Put the matching public key in `~/.ssh/authorized_keys` on the host
+  (or the realm SSH pubkey store). `keyboard-interactive` stays as the
+  fallback for first-time / OTP login. Uncomment `IdentityFile` and
+  point it at the private key. Auth method selection lives in
   `ssh_config`/`sshd_config` — Remote-SSH just shells out to a normal
   SSH client.
 - **Session reuse is required.** Remote-SSH opens more than one SSH
@@ -159,12 +166,17 @@ Copy it to `/etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf`, then
 `sshd -t && systemctl reload sshd`. None of the `remote.SSH.*` keys go
 here.
 
-That drop-in turns on password + keyboard-interactive (OTP) and the
-TCP/stream forwards Remote-SSH needs. `PerSourcePenaltyExemptList` stops
-OpenSSH 9.9+ banning the laptop IP after a hung OTP prompt — replace the
-placeholders with the workstation CIDRs.
+That drop-in turns on **pubkey** (so extra channels do not re-prompt
+for OTP), password + keyboard-interactive (OTP fallback), and the
+TCP/stream forwards Remote-SSH needs. Do **not** set
+`AuthenticationMethods` to keyboard-interactive only — that is what
+forces the token prompt on every channel. `PerSourcePenaltyExemptList`
+stops OpenSSH 9.9+ banning the laptop IP after a hung OTP prompt —
+replace the placeholders with the workstation CIDRs.
 
 First Factor = password. Second Factor = TOTP (not the password again).
+After a pubkey is authorized, subsequent channels authenticate with
+the key and skip both factors.
 
 ## 6. Why port 22 is enough
 

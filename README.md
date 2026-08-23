@@ -2,29 +2,30 @@
 
 Stage a **VS Code Remote-SSH** connection to an air-gapped Linux host —
 pre-install **both** server layouts (classic
-`~/.vscode-server/bin/<commit>/` and exec-server `code-<commit>` +
+`INSTALL_DIR/bin/<commit>/` and exec-server `code-<commit>` +
 `cli/servers/Stable-<commit>/server/`) so the client never tries to
 download anything, plus matching Linux/Windows client installers so
-Help → About reports the same commit. Connects over plain SSH port 22
-with realm (GSSAPI/Kerberos) auth **and** OTP. `code serve-web` and
-Microsoft's Remote Tunnels are supported as secondary, opt-in paths —
-with an honest look at why tunnels genuinely can't be made to work
-air-gapped.
+Help → About reports the same commit. Default `INSTALL_DIR` is
+`~/.vscode-server`. A shared path such as `/opt/vscode-server` is
+the fapolicyd-allowable shape (one directory, every user). `--link-home`
+puts the presence-test files in each user's `~/.vscode-server` as
+symlinks so Remote-SSH still finds them. Connects over plain SSH port
+22 with **pubkey first** (skips repeated OTP) and realm/OTP as the
+fallback. `code serve-web` and Microsoft's Remote Tunnels are
+secondary, opt-in paths.
 
 ```bash
 # Online host: fetch latest stable, install Remote-SSH server + both
 # client installers into ~/.vscode-server
 ./bin/vscode-airgap.sh --mode online
 
-# Online host: pin a commit, bundle extensions from a file
-./bin/vscode-airgap.sh --mode bundle --commit <40-char-commit> \
-  --bundle-path ./vscode-bundle.tar.gz --extensions-file team-extensions.txt
+# Shared install (as root) on the air-gapped host
+sudo ./bin/vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz \
+  --install-dir /opt/vscode-server --link-home --user youruser \
+  --install-fapolicyd
 
-# Air-gapped host, logged in as the SSH user: install, zero outbound calls
-./bin/vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz
-
-# Print ssh_config + JSONC settings.json + remote-host notes
-./bin/vscode-airgap.sh --emit-ssh-config
+# Print ssh_config + JSONC settings.json + sshd drop-in + fapolicyd rule
+./bin/vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server
 
 # Match an already-running remote instead of always grabbing latest:
 ./bin/vscode-airgap.sh --list-versions | head -20
