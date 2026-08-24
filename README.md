@@ -245,45 +245,94 @@ symlinks and ownership exactly as they were.
 world-readable, executed by everyone, allow-listed once. Nothing
 user-specific in it.
 
-## Pubkey on NFS home directories (SELinux)
+## Pubkey fails but password/OTP works
 
-Pubkey login fails while password and OTP still work, and
-`/var/log/secure` says:
+Three unrelated faults look identical from the client: the key is
+ignored and you get a password prompt. Take them in this order — the
+first two steps identify which one you have, and guessing here is how
+people lose an afternoon.
+
+**1. `/var/log/secure` tells you the family, not the cause.**
 
 ```
 Could not open user 'youruser' authorized keys /home/youruser/.ssh/authorized_keys: Permission denied
 ```
 
-That is SELinux, not file permissions — and on an NFS home no amount of
-`chmod`, `chown` or `restorecon` will fix it. Work down this ladder.
+sshd could not *read* the file. This line is **identical** whether the
+home is on NFS or the file is merely mislabelled on local disk — it does
+not distinguish them, so do not stop here. A different line means a
+different fault:
 
-**1. Look at the label before changing anything.**
-
-```bash
-ls -Z ~youruser/.ssh/authorized_keys
-matchpathcon ~youruser/.ssh/authorized_keys
+```
+Authentication refused: bad ownership or modes for file /home/youruser/.ssh/authorized_keys
 ```
 
-A **local** home that is merely mislabelled is the easy case, and this
-tool is not involved: `restorecon -R -v ~youruser/.ssh` and you are done.
-An **NFS** home shows `nfs_t`. An NFS mount carries a single label for
-the whole filesystem, so there is no per-file context to restore —
-`restorecon` cannot help and repeating it wastes time.
+With **no AVC** in the audit log, that is `StrictModes`, not SELinux: the
+key file, `~/.ssh`, or the home directory is group- or world-writable, or
+owned by the wrong account. Fix the modes and stop reading.
 
-**2. The boolean, if you have SELinux authority on the host.**
+**2. The audit log decides which SELinux case it is.**
+
+```bash
+ausearch --input /var/log/audit/audit.log -m avc -ts recent | grep sshd
+```
+
+Always pass `--input`. Bare `ausearch -m avc` reads only the current log
+and answers `<no matches>` on a host whose audit log has rotated, while
+the AVCs sit in the file it just skipped.
+
+| `tcontext` | What it means |
+|---|---|
+| `nfs_t` | NFS home — go to step 4 |
+| `default_t`, `tmp_t`, `var_t`, `admin_home_t`, `unlabeled_t`, `httpd_sys_content_t` | Local file with the wrong label, usually created elsewhere and moved in, or restored from a backup that carried no labels — go to step 3 |
+| `user_home_t`, `user_tmp_t` | **Not** the problem. `sshd_t` reads both on EL9 targeted policy; keep looking |
+| no AVC at all | Not SELinux — back to step 1 |
+
+**3. Local mislabel: confirm, relabel, done.**
+
+```bash
+matchpathcon -V ~youruser/.ssh/authorized_keys
+restorecon -Rv ~youruser/.ssh
+```
+
+Nothing in this tool is involved in that case.
+
+**4. NFS home: `restorecon` is not a fix here.**
+
+Run label checks **as the user**, not with `sudo`. Under `root_squash`
+root becomes `nobody`, cannot traverse a `0700 ~/.ssh`, and fails with a
+plain `Permission denied` before SELinux is ever consulted — which looks
+like a third problem and is not one.
+
+On an NFS mount:
+
+- `restorecon` **exits 0 and changes nothing.** A silent no-op, and the
+  most common false trail in this whole area.
+- `chcon` fails outright with `Operation not supported`.
+- Relabelling the file on the **server** does not help either: the client
+  assigns `nfs_t` through `genfscon` regardless of the backing file.
+
+Two real options, and you want exactly one of them.
+
+**Option A — the boolean, if you own SELinux policy on that host.**
 
 ```bash
 getsebool use_nfs_home_dirs
 setsebool -P use_nfs_home_dirs on
 ```
 
-This is the supported fix, and it is host-wide: it lets `sshd_t` read
-every NFS home rather than the one file you need, and configuration
-management may revert it on its next run. **This tool never sets an
-SELinux boolean** — flipping one is the host owner's decision, not a
-side effect of staging an editor.
+Host-wide: it lets `sshd_t` read every NFS home rather than the one file
+you need, and configuration management may revert it on its next run.
+**This tool never sets an SELinux boolean** — that is the host owner's
+decision, not a side effect of staging an editor.
 
-**3. A central key directory, when you do not have that authority.**
+**Option B — a central key directory, when you do not have that
+authority.** Preferred: no SELinux authority needed, and nothing outside
+this one user changes.
+
+**Do not do both.** The boolean makes the home copy readable again,
+which masks a central-dir install that is not actually working — you find
+out the day someone turns the boolean off.
 
 ```bash
 sudo ./bin/vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub --user youruser
@@ -320,15 +369,6 @@ Three details that are deliberate:
 separate mechanism and is untouched. Without `--central-keys` the
 emitted drop-in contains no `AuthorizedKeysFile` line at all, so a host
 that resolves keys through the realm keeps doing exactly that.
-
-**Reading the audit log.** On a host with rotated audit logs,
-`ausearch -m avc` can answer `<no matches>` while the AVCs are sitting in
-the file. Ask the file directly:
-
-```bash
-ausearch --input /var/log/audit/audit.log -m avc -ts recent
-grep -E 'avc.*denied.*(sshd|nfs_t)' /var/log/audit/audit.log | tail
-```
 
 ## When home is all you get
 

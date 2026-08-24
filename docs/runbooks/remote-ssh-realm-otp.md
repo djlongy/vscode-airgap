@@ -203,24 +203,42 @@ First Factor = password. Second Factor = TOTP (not the password again).
 After a pubkey is authorized, subsequent channels authenticate with
 the key and skip both factors.
 
-## 5a. Pubkey fails on an NFS home (SELinux)
+## 5a. Pubkey fails but password/OTP works
 
-Symptom: the key is in `~/.ssh/authorized_keys` with the right modes,
-password/OTP login works, pubkey does not, and `/var/log/secure` has
-`Could not open user ... authorized keys ...: Permission denied`. With
-SELinux enforcing and `use_nfs_home_dirs` off, `sshd_t` cannot read a
-file labelled `nfs_t` at all.
+Three different faults present the same way. Identify which one you have
+before changing anything.
 
-Ladder, in order:
-
-1. `ls -Z ~NAME/.ssh/authorized_keys` and `matchpathcon` on the same
-   path. A **local** home that is mislabelled is fixed by
-   `restorecon -R -v ~NAME/.ssh`. An **NFS** home cannot be relabelled —
-   one label covers the mount — so stop running restorecon.
-2. `setsebool -P use_nfs_home_dirs on`, if you own SELinux policy on
-   that host. Host-wide and broader than needed; config management may
-   revert it. This tool never sets it for you.
-3. Otherwise move the key to local disk and point sshd at it:
+1. **Read `/var/log/secure`.**
+   `Could not open user ... authorized keys ...: Permission denied` means
+   sshd could not read the file — and that line is **identical** for an
+   NFS home and for a mislabelled local file, so it does not tell you
+   which. `Authentication refused: bad ownership or modes for file ...`
+   with **no AVC** is `StrictModes` instead: something in the path is
+   group- or world-writable or owned by the wrong account. Not SELinux.
+2. **Read the audit log — this is what distinguishes them.**
+   ```bash
+   ausearch --input /var/log/audit/audit.log -m avc -ts recent | grep sshd
+   ```
+   Always `--input`: bare `ausearch -m avc` returns `<no matches>` on a
+   host with rotated logs while the AVCs sit in the file it skipped.
+   `tcontext=...:nfs_t` is the NFS case. `default_t`, `tmp_t`, `var_t`,
+   `admin_home_t`, `unlabeled_t` or `httpd_sys_content_t` is a local
+   mislabel. `user_home_t` and `user_tmp_t` are **not** denials —
+   `sshd_t` reads those fine on EL9 targeted policy.
+3. **Local mislabel:** `matchpathcon -V ~NAME/.ssh/authorized_keys`, then
+   `restorecon -Rv ~NAME/.ssh`. Done, nothing here is involved.
+4. **NFS home:** `restorecon` is not a fix. On an NFS mount it exits 0
+   and changes nothing, `chcon` fails with `Operation not supported`, and
+   relabelling the file on the server changes nothing either because the
+   client assigns `nfs_t` via `genfscon`. Run label checks as the user,
+   not with `sudo` — under `root_squash` root becomes `nobody`, cannot
+   traverse a `0700 ~/.ssh`, and fails with a plain `Permission denied`
+   before SELinux is consulted, which looks like a third problem.
+   Two options, and you want exactly one: `setsebool -P
+   use_nfs_home_dirs on` if you own SELinux policy on that host
+   (host-wide, config management may revert it — this tool never sets
+   it), **or** the central key directory below. Doing both hides a
+   broken central-dir install behind the boolean.
 
 ```bash
 ./bin/vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub --user NAME
@@ -239,10 +257,6 @@ hung hard mount listed first would stall auth; the home path second so
 the file stays correct on local-home hosts. Verify with
 `sshd -T -C user=NAME | grep -i authorizedkeysfile`, and with a control
 user who must still show only `.ssh/authorized_keys`.
-
-If `ausearch -m avc` says `<no matches>` on a host with rotated logs,
-read the file directly:
-`ausearch --input /var/log/audit/audit.log -m avc -ts recent`.
 
 ## 6. Why port 22 is enough
 

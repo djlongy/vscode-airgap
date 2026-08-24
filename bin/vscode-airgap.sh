@@ -407,53 +407,84 @@ MULTI-USER, ONE HOST
   install     One shared /opt/vscode-server tree that every user
               executes. Nothing user-specific lives in it.
 
-PUBKEY ON NFS HOME DIRECTORIES (SELinux)
-  Symptom: pubkey login fails while password/OTP still works, and
-  /var/log/secure says
-    Could not open user 'NAME' authorized keys /home/NAME/.ssh/authorized_keys:
-    Permission denied
-  That is SELinux, not file permissions. Work down this ladder.
+PUBKEY FAILS BUT PASSWORD/OTP WORKS (SELinux, NFS homes, StrictModes)
+  Three different faults produce "the key does not work". Take them in
+  this order — the first two steps tell you which one you have, and
+  guessing here wastes hours.
 
-  1. LOOK AT THE LABEL FIRST
-       ls -Z ~NAME/.ssh/authorized_keys
-       matchpathcon ~NAME/.ssh/authorized_keys
-     A LOCAL home that is merely mislabelled is the easy case and needs
-     nothing from this tool:
-       restorecon -R -v ~NAME/.ssh
-     An NFS home shows tcontext nfs_t. restorecon cannot fix that — the
-     whole mount carries one label, there is no per-file context to
-     restore. Do not keep running it.
+  1. /var/log/secure SAYS WHICH FAMILY IT IS
+       Could not open user 'NAME' authorized keys ...: Permission denied
+         -> sshd could not READ the file. SELinux, almost always.
+            This line is IDENTICAL for an NFS home and for a local file
+            with the wrong label. It does not tell them apart — step 2
+            does.
+       Authentication refused: bad ownership or modes for file ...
+         (and NO AVC in the audit log)
+         -> not SELinux at all. StrictModes: the key file, ~/.ssh, or
+            the home directory is group- or world-writable, or owned by
+            the wrong account. Fix the modes; stop reading this section.
 
-  2. THE BOOLEAN, IF YOU HAVE SELinux AUTHORITY ON THE HOST
-       getsebool use_nfs_home_dirs
-       setsebool -P use_nfs_home_dirs on
-     This is the supported fix and it is host-wide: it lets sshd_t (and
-     everything else covered by the boolean) read every NFS home, which
-     is broader than the one file you need, and configuration management
-     may revert it at the next run. This tool never sets a boolean —
-     that is the host owner's decision, not a side effect of staging an
-     editor.
+  2. THE AUDIT LOG DECIDES WHICH SELinux CASE
+       ausearch --input /var/log/audit/audit.log -m avc -ts recent | grep sshd
+     ALWAYS pass --input. Bare `ausearch -m avc` consults the current
+     log only and answers "<no matches>" on a host whose audit log has
+     rotated, while the AVCs sit in the file it just skipped.
+       tcontext=...:nfs_t          -> NFS home. Go to step 4.
+       tcontext=...:default_t
+                    tmp_t, var_t, admin_home_t, unlabeled_t,
+                    httpd_sys_content_t
+                                   -> LOCAL file with the wrong label,
+                                      typically created elsewhere and
+                                      moved in, or restored from a
+                                      backup that carried no labels.
+                                      Go to step 3.
+       tcontext=...:user_home_t or user_tmp_t
+                                   -> NOT the problem. sshd_t reads
+                                      both of these on EL9 targeted
+                                      policy. Keep looking.
+       no AVC at all               -> back to step 1.
 
-  3. A CENTRAL KEY DIRECTORY, WHEN YOU DO NOT
-       vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub \
-         --user NAME
-       vscode-airgap.sh --emit-ssh-config --central-keys --user NAME
-       cp <priority>-vscode-NAME.conf /etc/ssh/sshd_config.d/
-       sshd -t && systemctl reload sshd
-     The key moves to /etc/ssh/authorized_keys/NAME on local disk
-     (etc_t, which sshd_t may always read) and the drop-in points sshd
-     there FIRST, with .ssh/authorized_keys still second so the same
-     file keeps working on a host with local homes. No SELinux
-     authority needed, and nothing outside this one user changes.
+  3. LOCAL MISLABEL — CONFIRM, THEN RELABEL
+       matchpathcon -V ~NAME/.ssh/authorized_keys
+       restorecon -Rv ~NAME/.ssh
+     That is the whole fix. Nothing in this tool is involved.
 
-  DIAGNOSTIC TRAP: on a host with rotated audit logs, `ausearch -m avc`
-  can answer "<no matches>" while the AVCs are sitting in the file. Ask
-  the file directly:
-    ausearch --input /var/log/audit/audit.log -m avc -ts recent
-    grep -E 'avc.*denied.*(sshd|nfs_t)' /var/log/audit/audit.log | tail
-  /var/log/secure's "Could not open ... Permission denied" is the tell
-  either way, and `sshd -T -C user=NAME | grep -i authorizedkeysfile`
-  says which paths sshd will actually try.
+  4. NFS HOME — restorecon IS NOT A FIX HERE
+     Run any label check (ls -Z, matchpathcon) AS THE USER, not with
+     sudo. Under root_squash root is mapped to nobody, cannot traverse a
+     0700 ~/.ssh, and fails with a plain "Permission denied" before
+     SELinux is ever consulted — so `sudo restorecon -R ~NAME/.ssh`
+     reports a permission error that has nothing to do with labels and
+     looks like a third, non-existent problem.
+     On an NFS mount, run as the user who can actually read the path:
+       restorecon  exits 0 and changes NOTHING. A silent no-op, and the
+                   most common false trail in this whole area.
+       chcon       fails outright: "Operation not supported".
+       relabelling the file on the SERVER does not help either — the
+                   client assigns nfs_t through genfscon whatever the
+                   backing file is labelled.
+     Two real options, and you want exactly one of them:
+       (a) CENTRAL KEY DIRECTORY (this tool) — preferred. Needs no
+           SELinux authority and changes nothing for anyone else:
+             vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub \
+               --user NAME
+             vscode-airgap.sh --emit-ssh-config --central-keys --user NAME
+             cp <priority>-vscode-NAME.conf /etc/ssh/sshd_config.d/
+             sshd -t && systemctl reload sshd
+           The key lives at /etc/ssh/authorized_keys/NAME on local disk
+           (etc_t, which sshd_t may always read) and the drop-in points
+           sshd there FIRST, .ssh/authorized_keys still second.
+       (b) setsebool -P use_nfs_home_dirs on — host-wide, needs policy
+           authority on the box, and configuration management may revert
+           it. This tool never sets a boolean; that is the host owner's
+           call, not a side effect of staging an editor.
+     DO NOT DO BOTH. The boolean makes the home copy readable again,
+     which masks a central-dir install that is not actually working —
+     you find out the day someone turns the boolean off.
+
+  Whatever you land on, `sshd -T -C user=NAME | grep -i authorizedkeysfile`
+  is what says which paths sshd will really try, and the same command
+  for a control user says nobody else moved.
 
 EXAMPLES
   # Online side: latest stable, install Remote-SSH server + both client
@@ -2641,8 +2672,11 @@ write_sshd_user_dropin() {
 # boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
 # home (the file is labelled nfs_t). Pubkey login fails with "Could not
 # open user ... authorized keys ... Permission denied" in /var/log/secure
-# and an AVC per attempt. restorecon cannot relabel an NFS mount, so the
-# key has to live on a path sshd can always read.
+# and an AVC per attempt. restorecon does not fix that: on an NFS mount
+# it exits 0 and changes nothing, chcon fails with "Operation not
+# supported", and relabelling the file on the server changes nothing
+# either because the client assigns nfs_t through genfscon. So the key
+# has to live on a path sshd can always read.
 # WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
 # first writes three denied lines to /var/log/secure and three AVCs, and
 # a hung hard NFS mount named first would stall authentication itself.

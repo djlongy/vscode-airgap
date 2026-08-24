@@ -52,8 +52,11 @@
 # boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
 # home (the file is labelled nfs_t). Pubkey login fails with "Could not
 # open user ... authorized keys ... Permission denied" in /var/log/secure
-# and an AVC per attempt. restorecon cannot relabel an NFS mount, so the
-# key has to live on a path sshd can always read.
+# and an AVC per attempt. restorecon does not fix that: on an NFS mount
+# it exits 0 and changes nothing, chcon fails with "Operation not
+# supported", and relabelling the file on the server changes nothing
+# either because the client assigns nfs_t through genfscon. So the key
+# has to live on a path sshd can always read.
 # WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
 # first writes three denied lines to /var/log/secure and three AVCs, and
 # a hung hard NFS mount named first would stall authentication itself.
