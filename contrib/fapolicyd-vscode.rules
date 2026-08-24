@@ -3,10 +3,13 @@
 #   then: fagenrules --load && systemctl restart fapolicyd
 #
 # fapolicyd denies executing files not in the rpm trust db. VS Code Server
-# is a tarball extract, so it is untrusted until allow-listed. A HOME
-# allow-rule is the wrong shape on a multi-user host (every home, and
-# anything a user drops in it). Point INSTALL_DIR at a shared path
-# (default recommendation: /opt/vscode-server) and allow that directory.
+# is a tarball extract, so it is untrusted until allow-listed.
+#
+# Prefer a shared path (/opt/vscode-server) where the host lets you have
+# one: a single rule then covers every user, and it only allows a tree an
+# admin controls. A home-directory install is fully supported when a home
+# is all you are given — it just costs more, so the tradeoff is stated
+# below rather than hidden.
 #
 # Priority 25 lands before 30-patterns.rules (ld_so) and
 # 90-deny-execute.rules. Trailing slash on dir= is required.

@@ -7,7 +7,8 @@ pre-install **both** server layouts (classic
 download anything, plus matching Linux/Windows client installers so
 Help → About reports the same commit. Default `INSTALL_DIR` is
 `~/.vscode-server`. A shared path such as `/opt/vscode-server` is
-the fapolicyd-allowable shape (one directory, every user). `--link-home`
+the fapolicyd-allowable shape where a host gives you one (a single
+directory, every user); a home install stays fully supported. `--link-home`
 puts the presence-test files in each user's `~/.vscode-server` as
 symlinks so Remote-SSH still finds them. Connects over plain SSH port
 22 with **pubkey first** (skips repeated OTP) and realm/OTP as the
@@ -229,18 +230,44 @@ named user under both orderings, confirmed on a FreeIPA-enrolled EL9
 host and reproduced against OpenSSH 9.9p1. Check the baseline with
 `sshd -T -C user=someone-else`, never by reading the files.
 
-**fapolicyd is one shared rule**, not one per user: the allow-list
-covers `INSTALL_DIR`, so `--install-fapolicyd` re-run by the second
-admin rewrites the same file and only reloads fapolicyd when the content
-actually changed.
+**fapolicyd allow-lists `INSTALL_DIR`.** With a shared `/opt` tree that
+is one rule for the whole host, and `--install-fapolicyd` re-run by the
+second admin rewrites the same file and only reloads fapolicyd when the
+content actually changed. With per-user home installs it is one rule per
+home — see below.
 
 **`--link-home` is already per user** and, with the ownership fix above,
 each run only creates and chowns paths under that user's own
 `~/.vscode-server`. Running it for a colleague leaves the first user's
 symlinks and ownership exactly as they were.
 
-**The server tree is shared.** One `/opt/vscode-server`, world-readable,
-executed by everyone, allow-listed once. Nothing user-specific in it.
+**The server tree is shared where it can be.** One `/opt/vscode-server`,
+world-readable, executed by everyone, allow-listed once. Nothing
+user-specific in it.
+
+## When home is all you get
+
+Plenty of hosts hand a user a home directory and nothing else. That path
+is supported end to end — `--install-dir` defaults to `~/.vscode-server`,
+and `--link-home` is unnecessary because Remote-SSH already looks there.
+`--install-fapolicyd` writes the allow rule for that home tree and warns
+while it does it, rather than refusing:
+
+```
+WARN:  this rule allow-lists a home directory: /home/youruser/.vscode-server
+WARN:    everything under it becomes executable for that user, including
+WARN:    anything they drop in it later, and each extra user needs their own rule
+WARN:    prefer --install-dir /opt/vscode-server --link-home --user NAME
+WARN:    if this host lets you write to a shared path
+```
+
+The emitted `fapolicyd-vscode.rules` carries the same tradeoff as
+comments above the rule, so it travels with the file an admin installs.
+The honest summary: a home rule stops fapolicyd checking the trust db
+anywhere under that directory for that user, including files they add
+later, and the rule count grows with the team. `/opt/vscode-server` is
+preferable where a host allows it — one rule, one admin-controlled tree,
+every user covered — but it is a preference, not a prerequisite.
 
 ## Docs
 

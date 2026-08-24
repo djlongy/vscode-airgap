@@ -94,22 +94,25 @@ grep -q 'cannot write templates to' "$TMP/emit-err" \
 [ -f "$UNWRITABLE/ssh-config.example" ] && fail "wrote a template into an unwritable directory"
 chmod 0755 "$UNWRITABLE"
 
-# ── fapolicyd rule refuses a home directory unless forced ───────────────
+# ── a home-directory install is supported, with the tradeoff stated ─────
+# Some hosts only ever give a user their home. The rule must be live, and
+# the cost of allow-listing a home tree must travel with it.
 HOME_INSTALL="$TMP/fakehome/.vscode-server"
 mkdir -p "$TMP/fakehome"
 HOME="$TMP/fakehome" "$SCRIPT" --emit-ssh-config --install-dir "$HOME_INSTALL" >/dev/null
-grep -q '^allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
-  && fail "emitted an active fapolicyd allow-rule for a home directory"
-grep -q '^#allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
-  || fail "home-directory fapolicyd rule is neither active nor commented out"
-grep -q 'REFUSED' "$HOME_INSTALL/fapolicyd-vscode.rules" \
-  || fail "commented-out fapolicyd rule does not say why"
-# the refusal must not cost the operator the rest of the templates
+grep -q "^allow perm=any all : dir=${HOME_INSTALL}/" "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "no active fapolicyd allow-rule for a home-directory install"
+grep -q '^#allow' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  && fail "home-directory rule was commented out instead of emitted"
+grep -q 'THIS RULE COVERS A HOME DIRECTORY' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "home-directory rule does not state the tradeoff"
+grep -qi 'each additional user needs their own' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "home-directory rule does not mention the per-user rule cost"
 [ -f "$HOME_INSTALL/ssh-config.example" ] \
-  || fail "a refused fapolicyd rule stopped the other templates being written"
-HOME="$TMP/fakehome" "$SCRIPT" --emit-ssh-config --install-dir "$HOME_INSTALL" --force >/dev/null
-grep -q '^allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
-  || fail "--force did not emit the home-directory rule"
+  || fail "the home-directory warning stopped the other templates being written"
+# a shared path carries the rule without the home-directory note
+grep -q 'THIS RULE COVERS A HOME DIRECTORY' "$OUT/fapolicyd-vscode.rules" \
+  && fail "a non-home install dir was described as a home directory"
 
 # ── help documents ownership and the multi-user design ──────────────────
 HELP="$("$SCRIPT" --help)"

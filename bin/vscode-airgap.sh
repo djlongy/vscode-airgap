@@ -282,11 +282,14 @@ OPTIONS (env var equivalents in parentheses)
                           allowing dir=INSTALL_DIR/, then
                           fagenrules --load and restart fapolicyd.
                           Standalone, or with --mode. fapolicyd must
-                          already be installed. Refuses a home-directory
+                          already be installed. A home-directory
                           INSTALL_DIR (including the ~/.vscode-server
-                          default) — allow-listing a home tree is what
-                          fapolicyd is there to prevent. --force
-                          overrides. (INSTALL_FAPOLICYD=1)
+                          default) is supported and warns as it goes:
+                          the rule allows everything under that
+                          directory for that user, and each further user
+                          needs a rule of their own. Prefer
+                          /opt/vscode-server where the host gives you
+                          one. (INSTALL_FAPOLICYD=1)
   --fapolicyd-priority N  rules.d filename prefix, default 25 (before
                           the 30-patterns.rules ld_so deny and the 90
                           catch-all). (FAPOLICYD_PRIORITY)
@@ -300,9 +303,7 @@ OPTIONS (env var equivalents in parentheses)
                           already exists. With --link-home: replace a
                           real presence-test path with a symlink. With
                           --install-fapolicyd: rewrite and reload even
-                          when the rule file is already identical, and
-                          allow a home-directory rule that would
-                          otherwise be refused.
+                          when the rule file is already identical.
   -h, --help              This text.
 
 PROXY
@@ -365,10 +366,13 @@ MULTI-USER, ONE HOST
               sets PubkeyAuthentication yes globally, so a hardening
               file that means to turn it off has to sort before that
               (01-*, not 10-*). The per-user Match still wins either way.
-  fapolicyd   One shared rule for INSTALL_DIR, not one per user.
-              --install-fapolicyd rewrites it only when the content
-              actually changed, so a second admin's run does not bounce
-              fapolicyd (and its decision cache) for the whole host.
+  fapolicyd   One rule for INSTALL_DIR. With a shared /opt tree that is
+              one rule for the whole host; with per-user home installs
+              it is one rule per home, which is the cost of a host that
+              only gives you a home. Either way --install-fapolicyd
+              rewrites the file only when the content actually changed,
+              so a second admin's run does not bounce fapolicyd (and its
+              decision cache) for everyone.
   --link-home Already per user: it touches only ~NAME/.vscode-server and
               chowns what it creates to NAME, so a run for a colleague
               leaves the first user's links and ownership untouched.
@@ -439,11 +443,15 @@ LIMITATIONS — READ THIS BEFORE CHOOSING --tunnel OR --serve-web
 
   CIS/STIG hosts commonly mount /tmp noexec AND run fapolicyd, which
   denies execute from $HOME and /tmp (Remote-SSH's default write
-  locations). Put INSTALL_DIR at /opt/vscode-server, allow-list that
-  one directory in fapolicyd (--install-fapolicyd), and --link-home so
-  the presence tests in ~/.vscode-server are symlinks to /opt. A
-  HOME or /tmp install will fail with "Operation not permitted" or
-  exec format error (126). Also set
+  locations). Where the host gives you a shared path, put INSTALL_DIR at
+  /opt/vscode-server, allow-list that one directory in fapolicyd
+  (--install-fapolicyd), and --link-home so the presence tests in
+  ~/.vscode-server are symlinks to /opt. Where a home directory is all
+  you get, keep the default INSTALL_DIR and allow-list that home tree
+  instead — --install-fapolicyd does it and warns what it costs. An
+  un-allow-listed HOME install fails with "Operation not permitted" or
+  exec format error (126); /tmp stays unusable either way because of
+  noexec. Also set
   remote.SSH.remoteServerListenOnSocket: false in settings.json —
   true silently forces useLocalServer off (Windows ignores the UI
   toggle). See docs/runbooks/remote-ssh-realm-otp.md.
@@ -1748,23 +1756,20 @@ write_fapolicyd_example() {
     */) ;;
     *) dir="${dir}/" ;;
   esac
-  # INSTALL_DIR defaults to ~/.vscode-server, so the unqualified rule
-  # this used to emit was a home allow-rule — the exact shape the header
-  # below tells operators not to use. Emit it inert instead of handing
-  # over a line that is wrong the moment it is copied.
-  if [ "$FORCE" != "1" ] && is_home_path "$norm"; then
-    home_rule=1
-  fi
+  is_home_path "$norm" && home_rule=1
   cat <<EOF
 # WHERE THIS GOES — THIS Linux host as root
 #   /etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules
 #   then: fagenrules --load && systemctl restart fapolicyd
 #
 # fapolicyd denies executing files not in the rpm trust db. VS Code Server
-# is a tarball extract, so it is untrusted until allow-listed. A HOME
-# allow-rule is the wrong shape on a multi-user host (every home, and
-# anything a user drops in it). Point INSTALL_DIR at a shared path
-# (default recommendation: /opt/vscode-server) and allow that directory.
+# is a tarball extract, so it is untrusted until allow-listed.
+#
+# Prefer a shared path (/opt/vscode-server) where the host lets you have
+# one: a single rule then covers every user, and it only allows a tree an
+# admin controls. A home-directory install is fully supported when a home
+# is all you are given — it just costs more, so the tradeoff is stated
+# below rather than hidden.
 #
 # Priority ${FAPOLICYD_PRIORITY} lands before 30-patterns.rules (ld_so) and
 # 90-deny-execute.rules. Trailing slash on dir= is required.
@@ -1772,22 +1777,22 @@ EOF
   if [ "$home_rule" -eq 1 ]; then
     cat <<EOF
 #
-# REFUSED — INSTALL_DIR is inside a home directory:
+# THIS RULE COVERS A HOME DIRECTORY:
 #   ${dir}
-# The rule below is commented out on purpose. Allow-listing a home tree
-# lets every binary any user drops in their home execute, which is what
-# this host runs fapolicyd to stop. Install the server somewhere shared:
-#   --install-dir /opt/vscode-server --link-home --user NAME
-# Re-emit with --force if a home-directory rule really is what you want.
-
-#allow perm=any all : dir=${dir}
+# What that buys you: Remote-SSH works for this user on a host where you
+# cannot write to /opt.
+# What it costs: everything under that directory becomes executable for
+# that user, including anything they later drop in it — fapolicyd stops
+# checking the trust db in there. Each additional user needs their own
+# rule with their own path, so the rule count grows with the team.
+# Switch to --install-dir /opt/vscode-server --link-home --user NAME if
+# this host ever gives you a shared path.
 EOF
-  else
-    cat <<EOF
+  fi
+  cat <<EOF
 
 allow perm=any all : dir=${dir}
 EOF
-  fi
 }
 
 run_install_fapolicyd() {
@@ -1796,12 +1801,15 @@ run_install_fapolicyd() {
   local dir dest
   dir="$(_norm_path "$INSTALL_DIR")"
   [ -d "$dir" ] || die "INSTALL_DIR does not exist: $dir (install the server first)"
-  # Allow-listing a home tree hands execute rights to everything any user
-  # drops in their home — the policy this host runs fapolicyd to enforce.
-  # INSTALL_DIR defaults to ~/.vscode-server, so this is easy to hit by
-  # doing nothing at all.
-  if [ "$FORCE" != "1" ] && is_home_path "$dir"; then
-    die "refusing to allow-list a home directory: $dir — install the server somewhere shared instead (--install-dir /opt/vscode-server --link-home --user NAME), or pass --force if a home-directory rule really is what you want"
+  # A home-directory rule is supported — plenty of hosts only ever give a
+  # user their home — but it allows more than a shared tree would, so say
+  # so out loud instead of writing it silently.
+  if is_home_path "$dir"; then
+    warn "this rule allow-lists a home directory: $dir"
+    warn "  everything under it becomes executable for that user, including"
+    warn "  anything they drop in it later, and each extra user needs their own rule"
+    warn "  prefer --install-dir /opt/vscode-server --link-home --user NAME"
+    warn "  if this host lets you write to a shared path"
   fi
   dest="/etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
   # One shared rule for the whole host, so a second admin onboarding a
