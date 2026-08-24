@@ -282,7 +282,11 @@ OPTIONS (env var equivalents in parentheses)
                           allowing dir=INSTALL_DIR/, then
                           fagenrules --load and restart fapolicyd.
                           Standalone, or with --mode. fapolicyd must
-                          already be installed. (INSTALL_FAPOLICYD=1)
+                          already be installed. Refuses a home-directory
+                          INSTALL_DIR (including the ~/.vscode-server
+                          default) — allow-listing a home tree is what
+                          fapolicyd is there to prevent. --force
+                          overrides. (INSTALL_FAPOLICYD=1)
   --fapolicyd-priority N  rules.d filename prefix, default 25 (before
                           the 30-patterns.rules ld_so deny and the 90
                           catch-all). (FAPOLICYD_PRIORITY)
@@ -296,7 +300,9 @@ OPTIONS (env var equivalents in parentheses)
                           already exists. With --link-home: replace a
                           real presence-test path with a symlink. With
                           --install-fapolicyd: rewrite and reload even
-                          when the rule file is already identical.
+                          when the rule file is already identical, and
+                          allow a home-directory rule that would
+                          otherwise be refused.
   -h, --help              This text.
 
 PROXY
@@ -354,6 +360,11 @@ MULTI-USER, ONE HOST
               so add `Include /etc/ssh/sshd_config.d/*.conf` at the TOP
               of /etc/ssh/sshd_config there or the directory is dead
               weight. The sshd -T check tells you which case you are in.
+              Ordering only decides the GLOBAL baseline, and first
+              global value wins: on a FreeIPA host 04-ipa.conf already
+              sets PubkeyAuthentication yes globally, so a hardening
+              file that means to turn it off has to sort before that
+              (01-*, not 10-*). The per-user Match still wins either way.
   fapolicyd   One shared rule for INSTALL_DIR, not one per user.
               --install-fapolicyd rewrites it only when the content
               actually changed, so a second admin's run does not bounce
@@ -381,14 +392,17 @@ EXAMPLES
     --install-fapolicyd
 
   # Print ssh_config + JSONC settings.json + fapolicyd rule + one
-  # Match-scoped sshd drop-in per user
-  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+  # Match-scoped sshd drop-in per user. /opt/vscode-server is root-owned,
+  # so emitting into it needs sudo — or use a directory you own.
+  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+    --user alice --user bob
+  ./vscode-airgap.sh --emit-ssh-config --install-dir ~/vscode-templates \
     --user alice --user bob
 
   # Onboard a colleague later: their own sshd file, their own links,
   # nothing of alice's rewritten
   sudo ./vscode-airgap.sh --link-home --user carol --install-dir /opt/vscode-server
-  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server --user carol
+  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server --user carol
 
   # Optional secondary path: serve-web instead of / alongside Remote-SSH
   ./vscode-airgap.sh --mode online --serve-web
@@ -1706,12 +1720,41 @@ run_link_home() {
   done
 }
 
+# is_home_path <dir> — true when DIR sits inside somebody's home: under
+# /home/, under the invoking user's home, or under the login user's home
+# when this is running through sudo.
+is_home_path() {
+  local p="$1" invoker_home=""
+  case "$p" in
+    /home/*) return 0 ;;
+    "$HOME"|"$HOME"/*) return 0 ;;
+  esac
+  if [ -n "${SUDO_USER:-}" ]; then
+    invoker_home="$(getent passwd "$SUDO_USER" 2>/dev/null | awk -F: '{print $6}')"
+    if [ -n "$invoker_home" ]; then
+      case "$p" in
+        "$invoker_home"|"$invoker_home"/*) return 0 ;;
+      esac
+    fi
+  fi
+  return 1
+}
+
 write_fapolicyd_example() {
-  local dir="$(_norm_path "$INSTALL_DIR")"
+  local dir norm home_rule=0
+  norm="$(_norm_path "$INSTALL_DIR")"
+  dir="$norm"
   case "$dir" in
     */) ;;
     *) dir="${dir}/" ;;
   esac
+  # INSTALL_DIR defaults to ~/.vscode-server, so the unqualified rule
+  # this used to emit was a home allow-rule — the exact shape the header
+  # below tells operators not to use. Emit it inert instead of handing
+  # over a line that is wrong the moment it is copied.
+  if [ "$FORCE" != "1" ] && is_home_path "$norm"; then
+    home_rule=1
+  fi
   cat <<EOF
 # WHERE THIS GOES — THIS Linux host as root
 #   /etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules
@@ -1725,9 +1768,26 @@ write_fapolicyd_example() {
 #
 # Priority ${FAPOLICYD_PRIORITY} lands before 30-patterns.rules (ld_so) and
 # 90-deny-execute.rules. Trailing slash on dir= is required.
+EOF
+  if [ "$home_rule" -eq 1 ]; then
+    cat <<EOF
+#
+# REFUSED — INSTALL_DIR is inside a home directory:
+#   ${dir}
+# The rule below is commented out on purpose. Allow-listing a home tree
+# lets every binary any user drops in their home execute, which is what
+# this host runs fapolicyd to stop. Install the server somewhere shared:
+#   --install-dir /opt/vscode-server --link-home --user NAME
+# Re-emit with --force if a home-directory rule really is what you want.
+
+#allow perm=any all : dir=${dir}
+EOF
+  else
+    cat <<EOF
 
 allow perm=any all : dir=${dir}
 EOF
+  fi
 }
 
 run_install_fapolicyd() {
@@ -1736,6 +1796,13 @@ run_install_fapolicyd() {
   local dir dest
   dir="$(_norm_path "$INSTALL_DIR")"
   [ -d "$dir" ] || die "INSTALL_DIR does not exist: $dir (install the server first)"
+  # Allow-listing a home tree hands execute rights to everything any user
+  # drops in their home — the policy this host runs fapolicyd to enforce.
+  # INSTALL_DIR defaults to ~/.vscode-server, so this is easy to hit by
+  # doing nothing at all.
+  if [ "$FORCE" != "1" ] && is_home_path "$dir"; then
+    die "refusing to allow-list a home directory: $dir — install the server somewhere shared instead (--install-dir /opt/vscode-server --link-home --user NAME), or pass --force if a home-directory rule really is what you want"
+  fi
   dest="/etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
   # One shared rule for the whole host, so a second admin onboarding a
   # second user re-runs this and changes nothing. Only reload fapolicyd
@@ -1915,11 +1982,17 @@ install_from_stage() {
   else
     log "Remote-SSH server is staged and ready."
     log "Print templates AND the destination path for each file:"
+    # A shared tree installed by root is not writable from the operator's
+    # own shell, which is where they will run the emit from.
+    local emit_sudo=""
+    if is_root && want_shared; then
+      emit_sudo="sudo "
+    fi
     if [ -n "$LINK_USERS" ]; then
-      log "  $SELF --emit-ssh-config --install-dir $INSTALL_DIR --user $LINK_USERS"
+      log "  ${emit_sudo}$SELF --emit-ssh-config --install-dir $INSTALL_DIR --user $LINK_USERS"
       log "  (one Match-scoped sshd drop-in per user; nobody else's login changes)"
     else
-      log "  $SELF --emit-ssh-config"
+      log "  ${emit_sudo}$SELF --emit-ssh-config"
     fi
   fi
 }
@@ -2009,7 +2082,14 @@ run_status() {
 run_emit_ssh_config() {
   local emit_owner
   emit_owner="$(owner_for_tree "$INSTALL_DIR")"
-  mkdir -p "$INSTALL_DIR"
+  # mkdir -p succeeds on an existing root-owned directory, so it says
+  # nothing about whether the templates below can be written. Without
+  # this check the first redirect fails with a raw "Permission denied"
+  # and every later template is skipped in silence.
+  mkdir -p "$INSTALL_DIR" \
+    || die "cannot create $INSTALL_DIR — re-run under sudo, or pass --install-dir to a directory you own"
+  [ -w "$INSTALL_DIR" ] \
+    || die "cannot write templates to $INSTALL_DIR — re-run under sudo, or pass --install-dir to a directory you own"
   local ssh_out="$INSTALL_DIR/ssh-config.example"
   local settings_out="$INSTALL_DIR/settings.json.example"
   local fapo_out="$INSTALL_DIR/fapolicyd-vscode.rules"
@@ -2226,6 +2306,14 @@ write_sshd_user_dropin() {
 #   Include /etc/ssh/sshd_config.d/*.conf
 # EL9 and Debian/Ubuntu ship it already. The check above says which case
 # this host is in.
+#
+# On a FreeIPA-enrolled host, 04-ipa.conf already sets
+# PubkeyAuthentication yes GLOBALLY, and sshd keeps the FIRST global
+# value it reads for a keyword. A hardening file meant to turn pubkey off
+# for everyone therefore has to sort BEFORE it (01-*, not 10-*) or it is
+# a no-op — check with sshd -T -C user=SOMEONE-ELSE, not by reading
+# files. That ordering decides the global baseline only. The Match block
+# below still wins for ${user} either way.
 #
 # PER-USER ON PURPOSE. Every directive sits inside Match User ${user}, so
 # no other account changes. Remote-SSH opens more than one SSH channel

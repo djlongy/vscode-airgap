@@ -80,6 +80,37 @@ if "$SCRIPT" --emit-ssh-config --install-dir "$TMP/bad" --user '../root' >/dev/n
   fail "an invalid user name was accepted into a Match line and a filename"
 fi
 
+# ── emit into a directory we cannot write dies with advice ──────────────
+# mkdir -p succeeds on an existing root-owned dir, so this used to fail
+# as a raw redirect error after writing part of the set.
+UNWRITABLE="$TMP/unwritable"
+mkdir -p "$UNWRITABLE"
+chmod 0555 "$UNWRITABLE"
+if "$SCRIPT" --emit-ssh-config --install-dir "$UNWRITABLE" >/dev/null 2>"$TMP/emit-err"; then
+  fail "emitting into an unwritable directory should fail"
+fi
+grep -q 'cannot write templates to' "$TMP/emit-err" \
+  || fail "unwritable emit did not explain itself: $(cat "$TMP/emit-err")"
+[ -f "$UNWRITABLE/ssh-config.example" ] && fail "wrote a template into an unwritable directory"
+chmod 0755 "$UNWRITABLE"
+
+# ── fapolicyd rule refuses a home directory unless forced ───────────────
+HOME_INSTALL="$TMP/fakehome/.vscode-server"
+mkdir -p "$TMP/fakehome"
+HOME="$TMP/fakehome" "$SCRIPT" --emit-ssh-config --install-dir "$HOME_INSTALL" >/dev/null
+grep -q '^allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  && fail "emitted an active fapolicyd allow-rule for a home directory"
+grep -q '^#allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "home-directory fapolicyd rule is neither active nor commented out"
+grep -q 'REFUSED' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "commented-out fapolicyd rule does not say why"
+# the refusal must not cost the operator the rest of the templates
+[ -f "$HOME_INSTALL/ssh-config.example" ] \
+  || fail "a refused fapolicyd rule stopped the other templates being written"
+HOME="$TMP/fakehome" "$SCRIPT" --emit-ssh-config --install-dir "$HOME_INSTALL" --force >/dev/null
+grep -q '^allow perm=any all : dir=' "$HOME_INSTALL/fapolicyd-vscode.rules" \
+  || fail "--force did not emit the home-directory rule"
+
 # ── help documents ownership and the multi-user design ──────────────────
 HELP="$("$SCRIPT" --help)"
 printf '%s' "$HELP" | grep -q 'OWNERSHIP UNDER sudo' \

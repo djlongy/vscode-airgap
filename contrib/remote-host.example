@@ -15,6 +15,14 @@
 # EL9 and Debian/Ubuntu ship it already. The check above says which case
 # this host is in.
 #
+# On a FreeIPA-enrolled host, 04-ipa.conf already sets
+# PubkeyAuthentication yes GLOBALLY, and sshd keeps the FIRST global
+# value it reads for a keyword. A hardening file meant to turn pubkey off
+# for everyone therefore has to sort BEFORE it (01-*, not 10-*) or it is
+# a no-op — check with sshd -T -C user=SOMEONE-ELSE, not by reading
+# files. That ordering decides the global baseline only. The Match block
+# below still wins for youruser either way.
+#
 # PER-USER ON PURPOSE. Every directive sits inside Match User youruser, so
 # no other account changes. Remote-SSH opens more than one SSH channel
 # and a realm TOTP is anti-replay inside its 30-second window, so the

@@ -26,8 +26,10 @@ sudo ./bin/vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz 
   --install-fapolicyd
 
 # Print ssh_config + JSONC settings.json + fapolicyd rule + one
-# Match-scoped sshd drop-in per user (global hardening untouched)
-./bin/vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+# Match-scoped sshd drop-in per user (global hardening untouched).
+# /opt/vscode-server is root-owned, so writing templates there needs sudo
+# — or point --install-dir at a directory you own.
+sudo ./bin/vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
   --user alice --user bob
 
 # Match an already-running remote instead of always grabbing latest:
@@ -157,8 +159,11 @@ the default path, and point it at a file defining that same alias.
 pubkey on for your account only:
 
 ```bash
-./bin/vscode-airgap.sh --emit-ssh-config --user youruser
-sudo cp 50-vscode-youruser.conf /etc/ssh/sshd_config.d/
+# Emit somewhere you can write. The recommended /opt/vscode-server is
+# root-owned, so emitting there needs sudo — the tool says so and stops
+# rather than half-writing the set.
+./bin/vscode-airgap.sh --emit-ssh-config --user youruser --install-dir ~/vscode-templates
+sudo cp ~/vscode-templates/50-vscode-youruser.conf /etc/ssh/sshd_config.d/
 sudo sshd -t && sudo systemctl reload sshd
 sudo sshd -T -C user=youruser | grep -E 'pubkeyauth|authenticationmethods'
 ```
@@ -209,6 +214,20 @@ and you are global again. **EL8 ships no `Include` line at all**, so
 `/etc/ssh/sshd_config.d/` is ignored there until an admin adds
 `Include /etc/ssh/sshd_config.d/*.conf` at the *top* of
 `/etc/ssh/sshd_config`. The `sshd -T` check above is how you find out.
+
+Ordering decides the **global** baseline only, and the first global
+value wins. A FreeIPA-enrolled host already ships `04-ipa.conf` with
+`PubkeyAuthentication yes` set globally, so a hardening drop-in that
+means to turn pubkey off for everyone has to sort *before* it — `01-`,
+not `10-`. At `10-` that one line is silently a no-op and every account
+keeps `pubkeyauthentication yes`. A global `AuthenticationMethods` in
+the same hardening file does still apply (nothing earlier sets that
+keyword), so key-only login is still refused; it is `PubkeyAuthentication`
+alone that stays on. Either way this is a property of the host's
+baseline, not of this tool — the per-user `Match` override wins for the
+named user under both orderings, confirmed on a FreeIPA-enrolled EL9
+host and reproduced against OpenSSH 9.9p1. Check the baseline with
+`sshd -T -C user=someone-else`, never by reading the files.
 
 **fapolicyd is one shared rule**, not one per user: the allow-list
 covers `INSTALL_DIR`, so `--install-fapolicyd` re-run by the second

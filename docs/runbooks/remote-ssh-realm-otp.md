@@ -7,8 +7,11 @@ protocol. This script's job is getting the right server bits onto the
 remote host *before* the first connection so nothing tries to download
 anything mid-session.
 
-`--emit-ssh-config` writes four **templates** (also under `contrib/`).
-They are not live until you copy them:
+`--emit-ssh-config` writes these **templates** (also under `contrib/`),
+one sshd drop-in per `--user`. They are not live until you copy them.
+Write them somewhere you own — a root-owned `--install-dir` such as
+`/opt/vscode-server` needs `sudo`, and the tool stops with that advice
+rather than writing half the set:
 
 | Template | Who | Put it here |
 |---|---|---|
