@@ -245,6 +245,91 @@ symlinks and ownership exactly as they were.
 world-readable, executed by everyone, allow-listed once. Nothing
 user-specific in it.
 
+## Pubkey on NFS home directories (SELinux)
+
+Pubkey login fails while password and OTP still work, and
+`/var/log/secure` says:
+
+```
+Could not open user 'youruser' authorized keys /home/youruser/.ssh/authorized_keys: Permission denied
+```
+
+That is SELinux, not file permissions — and on an NFS home no amount of
+`chmod`, `chown` or `restorecon` will fix it. Work down this ladder.
+
+**1. Look at the label before changing anything.**
+
+```bash
+ls -Z ~youruser/.ssh/authorized_keys
+matchpathcon ~youruser/.ssh/authorized_keys
+```
+
+A **local** home that is merely mislabelled is the easy case, and this
+tool is not involved: `restorecon -R -v ~youruser/.ssh` and you are done.
+An **NFS** home shows `nfs_t`. An NFS mount carries a single label for
+the whole filesystem, so there is no per-file context to restore —
+`restorecon` cannot help and repeating it wastes time.
+
+**2. The boolean, if you have SELinux authority on the host.**
+
+```bash
+getsebool use_nfs_home_dirs
+setsebool -P use_nfs_home_dirs on
+```
+
+This is the supported fix, and it is host-wide: it lets `sshd_t` read
+every NFS home rather than the one file you need, and configuration
+management may revert it on its next run. **This tool never sets an
+SELinux boolean** — flipping one is the host owner's decision, not a
+side effect of staging an editor.
+
+**3. A central key directory, when you do not have that authority.**
+
+```bash
+sudo ./bin/vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub --user youruser
+sudo ./bin/vscode-airgap.sh --emit-ssh-config --central-keys --user youruser \
+  --install-dir ~/vscode-templates
+sudo cp ~/vscode-templates/50-vscode-youruser.conf /etc/ssh/sshd_config.d/
+sudo sshd -t && sudo systemctl reload sshd
+sudo sshd -T -C user=youruser | grep -i authorizedkeysfile
+# authorizedkeysfile /etc/ssh/authorized_keys/%u .ssh/authorized_keys
+sudo sshd -T -C user=someone-else | grep -i authorizedkeysfile
+# authorizedkeysfile .ssh/authorized_keys        <- untouched
+```
+
+The key lands at `/etc/ssh/authorized_keys/youruser`, `0644 root:root`,
+in a `0755 root:root` directory on local disk — `etc_t`, which `sshd_t`
+may always read. The drop-in names that path **first** and
+`.ssh/authorized_keys` second, inside `Match User youruser` as always.
+
+Three details that are deliberate:
+
+- **Central first, not second.** Every login that consults an unreadable
+  NFS path writes three denied lines to `/var/log/secure` and three AVCs
+  before falling through, and a hung hard NFS mount named first would
+  stall authentication itself.
+- **The home path stays second**, so the same file is still correct on a
+  host with local homes — nothing to undo if the user or the mount moves.
+- **`StrictModes` decides what sshd will accept**: the key file must be
+  owned by root or by that user and must not be group- or world-writable.
+  `0644 root:root` is the tight choice. `--install-authorized-key`
+  refuses a directory or key file that is out of shape and tells you what
+  is wrong rather than chowning a path somebody else set up.
+
+`AuthorizedKeysCommand` (FreeIPA's `sss_ssh_authorizedkeys`) is a
+separate mechanism and is untouched. Without `--central-keys` the
+emitted drop-in contains no `AuthorizedKeysFile` line at all, so a host
+that resolves keys through the realm keeps doing exactly that.
+
+**Reading the audit log.** On a host with rotated audit logs,
+`ausearch -m avc` can answer `<no matches>` while the AVCs are sitting in
+the file. Ask the file directly:
+
+```bash
+ausearch --input /var/log/audit/audit.log -m avc -ts recent
+grep -E 'avc.*denied.*(sshd|nfs_t)' /var/log/audit/audit.log | tail
+```
+
 ## When home is all you get
 
 Plenty of hosts hand a user a home directory and nothing else. That path

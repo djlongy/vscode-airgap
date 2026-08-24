@@ -67,6 +67,69 @@ if grep -q 'AuthenticationMethods publickey,keyboard-interactive' "$DROPIN"; the
   fail "drop-in requires publickey AND keyboard-interactive, which puts OTP back on every channel"
 fi
 
+# ── --central-keys: AuthorizedKeysFile, central path FIRST ──────────────
+# For hosts where sshd cannot read an NFS home under SELinux.
+CK="$TMP/central"
+"$SCRIPT" --emit-ssh-config --install-dir "$CK" --user alice --central-keys >/dev/null
+CK_DROPIN="$CK/50-vscode-alice.conf"
+AKF="$(grep -E '^[[:space:]]*AuthorizedKeysFile' "$CK_DROPIN" || true)"
+[ -n "$AKF" ] || fail "--central-keys emitted no AuthorizedKeysFile line"
+# field 2 is the first path sshd tries; it must be the central one
+[ "$(printf '%s\n' "$AKF" | awk '{print $2}')" = "/etc/ssh/authorized_keys/%u" ] \
+  || fail "central path is not first in: $AKF"
+[ "$(printf '%s\n' "$AKF" | awk '{print $3}')" = ".ssh/authorized_keys" ] \
+  || fail "home path is not kept as the second AuthorizedKeysFile entry: $AKF"
+# still per-user: the directive lives inside the Match block
+awk '/^Match /{seen=1} /^[[:space:]]*AuthorizedKeysFile/{ if (!seen) exit 1 }' "$CK_DROPIN" \
+  || fail "AuthorizedKeysFile was emitted outside the Match block"
+grep -q 'nfs_t' "$CK_DROPIN" || fail "central-keys drop-in does not explain why it exists"
+"$SCRIPT" --emit-ssh-config --install-dir "$TMP/central2" --user alice --central-keys /srv/ssh-keys >/dev/null
+grep -qF 'AuthorizedKeysFile /srv/ssh-keys/%u .ssh/authorized_keys' "$TMP/central2/50-vscode-alice.conf" \
+  || fail "--central-keys DIR was not honoured"
+# Default emission must stay exactly as it was: no AuthorizedKeysFile line
+# at all, so a FreeIPA host's AuthorizedKeysCommand is left alone.
+grep -qE '^[[:space:]]*AuthorizedKeysFile' "$DROPIN" \
+  && fail "the default drop-in gained an AuthorizedKeysFile line"
+diff -q "$ROOT/contrib/remote-host-central-keys.example" \
+  "$TMP/contribcheck-ck/50-vscode-youruser.conf" >/dev/null 2>&1 || {
+  "$SCRIPT" --emit-ssh-config --install-dir "$TMP/contribcheck-ck" --user youruser --central-keys >/dev/null
+  diff -q "$ROOT/contrib/remote-host-central-keys.example" \
+    "$TMP/contribcheck-ck/50-vscode-youruser.conf" >/dev/null \
+    || fail "contrib/remote-host-central-keys.example is out of sync with the emitted drop-in"
+}
+
+# ── --install-authorized-key refuses what sshd would refuse ─────────────
+KEYSRC="$TMP/id_test.pub"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYFORTESTSONLYxxxxxxxxxxxxxxxxxxxxx test@example\n' > "$KEYSRC"
+BADDIR="$TMP/badkeys"
+mkdir -p "$BADDIR"
+chmod 0777 "$BADDIR"
+if "$SCRIPT" --install-authorized-key "$KEYSRC" --user "$(id -un)" --central-keys "$BADDIR" \
+    >/dev/null 2>"$TMP/key-err"; then
+  fail "installing into a world-writable key directory should fail"
+fi
+grep -q 'not in the shape sshd requires' "$TMP/key-err" \
+  || fail "key install did not explain the refusal: $(cat "$TMP/key-err")"
+[ -z "$(ls -A "$BADDIR")" ] || fail "key was written into a directory sshd would reject"
+chmod 0755 "$BADDIR"
+# a world-writable existing key file is refused the same way, unchanged
+printf 'ssh-ed25519 AAAAOLDKEY old@example\n' > "$BADDIR/$(id -un)"
+chmod 0666 "$BADDIR/$(id -un)"
+if "$SCRIPT" --install-authorized-key "$KEYSRC" --user "$(id -un)" --central-keys "$BADDIR" \
+    >/dev/null 2>"$TMP/key-err2"; then
+  fail "installing over a world-writable key file should fail"
+fi
+grep -q 'StrictModes' "$TMP/key-err2" || fail "key-file refusal does not mention StrictModes"
+grep -qF 'AAAAOLDKEY' "$BADDIR/$(id -un)" || fail "refused install still modified the key file"
+[ "$(wc -l < "$BADDIR/$(id -un)" | tr -d ' ')" -eq 1 ] || fail "refused install appended to the key file"
+# a private key must never be installed
+if printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n' | \
+    "$SCRIPT" --install-authorized-key --user "$(id -un)" --central-keys "$TMP/privkeys" \
+    >/dev/null 2>&1; then
+  fail "a private key was accepted"
+fi
+[ -d "$TMP/privkeys" ] && fail "a refused private key still created the key directory"
+
 # ── additive: a colleague is a new file, never an edit to the first ─────
 ALICE_BEFORE="$(cat "$DROPIN")"
 "$SCRIPT" --emit-ssh-config --install-dir "$OUT" --user bob >/dev/null

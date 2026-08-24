@@ -203,6 +203,47 @@ First Factor = password. Second Factor = TOTP (not the password again).
 After a pubkey is authorized, subsequent channels authenticate with
 the key and skip both factors.
 
+## 5a. Pubkey fails on an NFS home (SELinux)
+
+Symptom: the key is in `~/.ssh/authorized_keys` with the right modes,
+password/OTP login works, pubkey does not, and `/var/log/secure` has
+`Could not open user ... authorized keys ...: Permission denied`. With
+SELinux enforcing and `use_nfs_home_dirs` off, `sshd_t` cannot read a
+file labelled `nfs_t` at all.
+
+Ladder, in order:
+
+1. `ls -Z ~NAME/.ssh/authorized_keys` and `matchpathcon` on the same
+   path. A **local** home that is mislabelled is fixed by
+   `restorecon -R -v ~NAME/.ssh`. An **NFS** home cannot be relabelled —
+   one label covers the mount — so stop running restorecon.
+2. `setsebool -P use_nfs_home_dirs on`, if you own SELinux policy on
+   that host. Host-wide and broader than needed; config management may
+   revert it. This tool never sets it for you.
+3. Otherwise move the key to local disk and point sshd at it:
+
+```bash
+./bin/vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub --user NAME
+./bin/vscode-airgap.sh --emit-ssh-config --central-keys --user NAME \
+  --install-dir ~/vscode-templates
+sudo cp ~/vscode-templates/50-vscode-NAME.conf /etc/ssh/sshd_config.d/
+sudo sshd -t && sudo systemctl reload sshd
+```
+
+That writes `/etc/ssh/authorized_keys/NAME` (`0644 root:root`, in a
+`0755 root:root` directory) and emits
+`AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys`
+inside the user's `Match` block — central first because each attempt on
+an unreadable NFS path costs three denied lines and three AVCs, and a
+hung hard mount listed first would stall auth; the home path second so
+the file stays correct on local-home hosts. Verify with
+`sshd -T -C user=NAME | grep -i authorizedkeysfile`, and with a control
+user who must still show only `.ssh/authorized_keys`.
+
+If `ausearch -m avc` says `<no matches>` on a host with rotated logs,
+read the file directly:
+`ausearch --input /var/log/audit/audit.log -m avc -ts recent`.
+
 ## 6. Why port 22 is enough
 
 Remote-SSH listens on **localhost** on the remote host. The client

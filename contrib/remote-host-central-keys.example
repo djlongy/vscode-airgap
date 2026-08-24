@@ -1,0 +1,93 @@
+# WHERE THIS GOES — THIS Linux host as root, NOT the laptop
+#   /etc/ssh/sshd_config.d/50-vscode-youruser.conf
+#   then: sshd -t && systemctl reload sshd
+#
+# PROVE IT — the only check that counts:
+#   sshd -T -C user=youruser | grep -E 'pubkeyauth|authenticationmethods'
+#     -> pubkeyauthentication yes
+#     -> authenticationmethods publickey keyboard-interactive
+#   sshd -T -C user=SOMEONE-ELSE | grep -E 'pubkeyauth|authenticationmethods'
+#     -> unchanged, still this host's hardened baseline
+#
+# EL8's stock sshd_config has no Include line, so this whole directory is
+# ignored there until an admin adds, at the TOP of /etc/ssh/sshd_config:
+#   Include /etc/ssh/sshd_config.d/*.conf
+# EL9 and Debian/Ubuntu ship it already. The check above says which case
+# this host is in.
+#
+# On a FreeIPA-enrolled host, 04-ipa.conf already sets
+# PubkeyAuthentication yes GLOBALLY, and sshd keeps the FIRST global
+# value it reads for a keyword. A hardening file meant to turn pubkey off
+# for everyone therefore has to sort BEFORE it (01-*, not 10-*) or it is
+# a no-op — check with sshd -T -C user=SOMEONE-ELSE, not by reading
+# files. That ordering decides the global baseline only. The Match block
+# below still wins for youruser either way.
+#
+# PER-USER ON PURPOSE. Every directive sits inside Match User youruser, so
+# no other account changes. Remote-SSH opens more than one SSH channel
+# and a realm TOTP is anti-replay inside its 30-second window, so the
+# second channel is denied unless a key can authenticate it. That is why
+# this one user needs pubkey, and why nobody else has to.
+#
+# ONE FILE PER USER. A colleague gets their own
+# 50-vscode-<name>.conf: adding them never edits this file,
+# and re-emitting for youruser rewrites only this one.
+#
+# AuthenticationMethods: space-separated entries are ALTERNATIVES,
+# comma-separated entries are ALL REQUIRED. "publickey
+# keyboard-interactive" means the key alone is enough, while the OTP path
+# still works for the first login before the key is installed. Never
+# write "publickey,keyboard-interactive" — that demands both and puts the
+# OTP prompt back on every channel, which is the problem this solves. If
+# the baseline needs more than keyboard-interactive on its own, restate
+# it as the second alternative, e.g.
+# "publickey password,keyboard-interactive". Drop the second alternative
+# once the key works if the site wants youruser on pubkey only.
+#
+# CENTRAL KEY DIRECTORY. The AuthorizedKeysFile below names two paths and
+# sshd reads them in order:
+#   1. /etc/ssh/authorized_keys/%u   — root-owned, on local disk, label etc_t
+#   2. .ssh/authorized_keys — the user's own copy, in their home
+# WHY THIS EXISTS: with SELinux enforcing and the use_nfs_home_dirs
+# boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
+# home (the file is labelled nfs_t). Pubkey login fails with "Could not
+# open user ... authorized keys ... Permission denied" in /var/log/secure
+# and an AVC per attempt. restorecon cannot relabel an NFS mount, so the
+# key has to live on a path sshd can always read.
+# WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
+# first writes three denied lines to /var/log/secure and three AVCs, and
+# a hung hard NFS mount named first would stall authentication itself.
+# WHY THE HOME PATH STAYS SECOND: the same file then keeps working
+# unchanged on hosts whose homes are local, so there is nothing to undo
+# if this user moves or the mount changes.
+# WHAT sshd REQUIRES of the file (StrictModes): owned by root or by
+# youruser, and not group- or world-writable. 0644 root:root is what
+# --install-authorized-key writes; the directory is 0755 root:root.
+# AuthorizedKeysCommand (FreeIPA: sss_ssh_authorizedkeys) is a separate
+# mechanism and is untouched by this file.
+  else
+    keys_note=# THE KEY ITSELF is not configured here: either
+# ~youruser/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
+# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
+# resolves keys through AuthorizedKeysCommand (FreeIPA:
+# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
+# arrangement is disturbed. On a host whose homes are on NFS with
+# SELinux enforcing, sshd cannot read the home copy at all — see
+# --central-keys and --install-authorized-key.
+#
+# NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
+# client IP after a hung OTP prompt) is global-only. If operators get
+# locked out, an admin adds it to the host's own hardening file.
+
+Match User youruser
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey keyboard-interactive
+    AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys
+    # Remote-SSH tunnels its server over the session. Both are sshd
+    # defaults, restated for youruser in case the baseline turns them off.
+    AllowTcpForwarding yes
+    AllowStreamLocalForwarding yes
+
+# Back to global scope. Anything appended below this line applies to
+# every user, not to youruser. Keep it last.
+Match all

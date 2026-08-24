@@ -26,6 +26,7 @@ readonly DEFAULT_PORT="8000"
 readonly DEFAULT_SERVER_ARCH="linux-x64"
 readonly DEFAULT_FAPOLICYD_PRIORITY="25"
 readonly DEFAULT_SSHD_PRIORITY="50"
+readonly DEFAULT_CENTRAL_KEYS_DIR="/etc/ssh/authorized_keys"
 readonly VSCODE_GIT_REPO="https://github.com/microsoft/vscode.git"
 readonly DEFAULT_TAG_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vscode-airgap"
 readonly DEFAULT_TAG_CACHE_TTL="86400"   # 24h — tags don't change often enough to justify refetching every run
@@ -53,6 +54,9 @@ LINK_USERS="${LINK_USERS:-}"
 INSTALL_FAPOLICYD="${INSTALL_FAPOLICYD:-0}"
 FAPOLICYD_PRIORITY="${FAPOLICYD_PRIORITY:-$DEFAULT_FAPOLICYD_PRIORITY}"
 SSHD_PRIORITY="${SSHD_PRIORITY:-$DEFAULT_SSHD_PRIORITY}"
+CENTRAL_KEYS="${CENTRAL_KEYS:-0}"        # opt-in: emit AuthorizedKeysFile with a central path first
+CENTRAL_KEYS_DIR="${CENTRAL_KEYS_DIR:-$DEFAULT_CENTRAL_KEYS_DIR}"
+AUTHORIZED_KEY_SRC=""                    # --install-authorized-key's key file; empty means stdin
 WITH_SERVE_WEB=0          # --serve-web: also fetch+optionally start code serve-web
 WITH_CLI=0                # implied by --serve-web or --tunnel
 LIST_VERSIONS="${LIST_VERSIONS:-0}"
@@ -106,6 +110,7 @@ USAGE
   vscode-airgap.sh --status [--install-dir DIR]
   vscode-airgap.sh --link-home [--user NAME] [--install-dir DIR]
   vscode-airgap.sh --install-fapolicyd [--install-dir DIR]
+  vscode-airgap.sh --install-authorized-key KEY.pub --user NAME [--central-keys DIR]
   vscode-airgap.sh --list-versions [--limit N|--all] [--format text|json] [--refresh]
   vscode-airgap.sh --help
 
@@ -293,6 +298,29 @@ OPTIONS (env var equivalents in parentheses)
   --fapolicyd-priority N  rules.d filename prefix, default 25 (before
                           the 30-patterns.rules ld_so deny and the 90
                           catch-all). (FAPOLICYD_PRIORITY)
+  --central-keys [DIR]    Emit the per-user sshd drop-in with
+                          AuthorizedKeysFile naming DIR/%u FIRST and
+                          .ssh/authorized_keys second. DIR defaults to
+                          /etc/ssh/authorized_keys. For hosts where sshd
+                          cannot read the home copy at all — NFS homes
+                          under SELinux. Off by default: without this
+                          flag no AuthorizedKeysFile line is emitted and
+                          the host's own key lookup (including FreeIPA's
+                          AuthorizedKeysCommand) is left alone. See
+                          PUBKEY ON NFS HOME DIRECTORIES.
+                          (CENTRAL_KEYS=1, CENTRAL_KEYS_DIR)
+  --install-authorized-key [FILE]
+                          As root: install a public key at
+                          <central-keys>/NAME, 0644 root:root, in a
+                          0755 root:root directory. Needs --user NAME.
+                          Reads FILE, or stdin when FILE is omitted or
+                          "-". Appends without duplicating, refuses a
+                          private key, and refuses a directory or key
+                          file that is not in the shape sshd's
+                          StrictModes accepts — it reports what is wrong
+                          instead of chowning somebody else's path into
+                          line. Runs restorecon -F where it exists and
+                          never touches an SELinux boolean. Standalone.
   --sshd-priority N       sshd_config.d filename prefix for the
                           emitted per-user drop-in, default 50. Raise
                           it only if another drop-in already carries a
@@ -379,6 +407,54 @@ MULTI-USER, ONE HOST
   install     One shared /opt/vscode-server tree that every user
               executes. Nothing user-specific lives in it.
 
+PUBKEY ON NFS HOME DIRECTORIES (SELinux)
+  Symptom: pubkey login fails while password/OTP still works, and
+  /var/log/secure says
+    Could not open user 'NAME' authorized keys /home/NAME/.ssh/authorized_keys:
+    Permission denied
+  That is SELinux, not file permissions. Work down this ladder.
+
+  1. LOOK AT THE LABEL FIRST
+       ls -Z ~NAME/.ssh/authorized_keys
+       matchpathcon ~NAME/.ssh/authorized_keys
+     A LOCAL home that is merely mislabelled is the easy case and needs
+     nothing from this tool:
+       restorecon -R -v ~NAME/.ssh
+     An NFS home shows tcontext nfs_t. restorecon cannot fix that — the
+     whole mount carries one label, there is no per-file context to
+     restore. Do not keep running it.
+
+  2. THE BOOLEAN, IF YOU HAVE SELinux AUTHORITY ON THE HOST
+       getsebool use_nfs_home_dirs
+       setsebool -P use_nfs_home_dirs on
+     This is the supported fix and it is host-wide: it lets sshd_t (and
+     everything else covered by the boolean) read every NFS home, which
+     is broader than the one file you need, and configuration management
+     may revert it at the next run. This tool never sets a boolean —
+     that is the host owner's decision, not a side effect of staging an
+     editor.
+
+  3. A CENTRAL KEY DIRECTORY, WHEN YOU DO NOT
+       vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub \
+         --user NAME
+       vscode-airgap.sh --emit-ssh-config --central-keys --user NAME
+       cp <priority>-vscode-NAME.conf /etc/ssh/sshd_config.d/
+       sshd -t && systemctl reload sshd
+     The key moves to /etc/ssh/authorized_keys/NAME on local disk
+     (etc_t, which sshd_t may always read) and the drop-in points sshd
+     there FIRST, with .ssh/authorized_keys still second so the same
+     file keeps working on a host with local homes. No SELinux
+     authority needed, and nothing outside this one user changes.
+
+  DIAGNOSTIC TRAP: on a host with rotated audit logs, `ausearch -m avc`
+  can answer "<no matches>" while the AVCs are sitting in the file. Ask
+  the file directly:
+    ausearch --input /var/log/audit/audit.log -m avc -ts recent
+    grep -E 'avc.*denied.*(sshd|nfs_t)' /var/log/audit/audit.log | tail
+  /var/log/secure's "Could not open ... Permission denied" is the tell
+  either way, and `sshd -T -C user=NAME | grep -i authorizedkeysfile`
+  says which paths sshd will actually try.
+
 EXAMPLES
   # Online side: latest stable, install Remote-SSH server + both client
   # installers into ~/.vscode-server, with two extensions from a file
@@ -402,6 +478,15 @@ EXAMPLES
     --user alice --user bob
   ./vscode-airgap.sh --emit-ssh-config --install-dir ~/vscode-templates \
     --user alice --user bob
+
+  # NFS home + SELinux enforcing: put the key where sshd can read it and
+  # point sshd at it, for this user only
+  sudo ./vscode-airgap.sh --install-authorized-key ~alice/.ssh/id_ed25519.pub --user alice
+  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+    --user alice --central-keys
+  sudo cp /opt/vscode-server/50-vscode-alice.conf /etc/ssh/sshd_config.d/
+  sudo sshd -t && sudo systemctl reload sshd
+  sudo sshd -T -C user=alice | grep -i authorizedkeysfile
 
   # Onboard a colleague later: their own sshd file, their own links,
   # nothing of alice's rewritten
@@ -504,6 +589,23 @@ while [ $# -gt 0 ]; do
     --install-fapolicyd) INSTALL_FAPOLICYD=1; shift ;;
     --fapolicyd-priority) FAPOLICYD_PRIORITY="$2"; shift 2 ;;
     --sshd-priority) SSHD_PRIORITY="$2"; shift 2 ;;
+    --central-keys)
+      CENTRAL_KEYS=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        CENTRAL_KEYS_DIR="$2"
+        shift
+      fi
+      shift
+      ;;
+    --install-authorized-key)
+      ACTION="install-authorized-key"
+      CENTRAL_KEYS=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        AUTHORIZED_KEY_SRC="$2"
+        shift
+      fi
+      shift
+      ;;
     --force) FORCE=1; shift ;;
     --refresh) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -527,7 +629,8 @@ if [ -z "$MODE" ] && [ "$ACTION" = "install" ]; then
   fi
 fi
 if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] || [ "$ACTION" = "list-versions" ] \
-    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ]; then
+    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ] \
+    || [ "$ACTION" = "install-authorized-key" ]; then
   STANDALONE_ACTION=1
 else
   STANDALONE_ACTION=0
@@ -539,7 +642,8 @@ fi
 # ── Dependency check ─────────────────────────────────────────────────────
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] \
-    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ]; then
+    || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ] \
+    || [ "$ACTION" = "install-authorized-key" ]; then
   : # genuinely zero deps beyond bash/coreutils, by design
 elif [ "$ACTION" = "list-versions" ]; then
   if [ -z "$BUNDLE_PATH" ]; then
@@ -1587,6 +1691,28 @@ path_owner() {
   printf '%s' "$out"
 }
 
+# path_mode <path> — octal mode of PATH itself, empty when it is missing.
+# Same GNU/BSD split as path_owner.
+path_mode() {
+  local p="${1:-}" out=""
+  { [ -n "$p" ] && [ -e "$p" ]; } || return 0
+  out="$(stat -c '%a' "$p" 2>/dev/null || true)"
+  if [ -z "$out" ]; then
+    out="$(stat -f '%Lp' "$p" 2>/dev/null || true)"
+  fi
+  printf '%s' "$out"
+}
+
+# mode_group_world_writable <octal> — what sshd's StrictModes rejects.
+mode_group_world_writable() {
+  local m="${1:-}"
+  [ -n "$m" ] || return 1
+  m="${m: -3}"   # ugo digits; stat prints 4 when a setuid/sticky bit is set
+  case "${m:1:1}" in 2|3|6|7) return 0 ;; esac
+  case "${m:2:1}" in 2|3|6|7) return 0 ;; esac
+  return 1
+}
+
 # user_owner <name> — "uid:gid" from passwd. id(1) for the current user,
 # so this still answers where the account has no local passwd entry.
 user_owner() {
@@ -1793,6 +1919,209 @@ EOF
 
 allow perm=any all : dir=${dir}
 EOF
+}
+
+# ── central authorized_keys ────────────────────────────────────────────
+# Put a user's public key on a path sshd can always read. On a host whose
+# homes are NFS with SELinux enforcing, sshd_t cannot read nfs_t at all,
+# so ~/.ssh/authorized_keys is unreadable no matter how it is labelled and
+# restorecon cannot fix it (an NFS mount carries one label for the whole
+# filesystem). This never touches an SELinux boolean — changing
+# use_nfs_home_dirs is host-wide and the operator's call, not a side
+# effect of installing a key.
+central_key_file() { printf '%s/%s' "$(_norm_path "$CENTRAL_KEYS_DIR")" "$1"; }
+
+# read_public_key_material — from a file argument, or stdin when none was
+# given. Refuses anything that is not an OpenSSH public key line, and
+# refuses a private key outright rather than writing it somewhere
+# world-readable.
+read_public_key_material() {
+  local raw="" line out=""
+  if [ -n "$AUTHORIZED_KEY_SRC" ] && [ "$AUTHORIZED_KEY_SRC" != "-" ]; then
+    [ -f "$AUTHORIZED_KEY_SRC" ] || die "public key file not found: $AUTHORIZED_KEY_SRC"
+    raw="$(cat "$AUTHORIZED_KEY_SRC")"
+  else
+    [ ! -t 0 ] || die "no key given — pass the .pub file (--install-authorized-key ~/.ssh/id_ed25519.pub) or pipe one in"
+    raw="$(cat)"
+  fi
+  case "$raw" in
+    *"PRIVATE KEY"*) die "that is a PRIVATE key — install the matching .pub file instead. Nothing was written." ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    case " $line " in
+      *" ssh-rsa "*|*" ssh-ed25519 "*|*" ssh-dss "*|*" ecdsa-sha2-nistp"*|*" sk-ssh-ed25519@openssh.com "*|*" sk-ecdsa-sha2-nistp"*) ;;
+      *) die "not an OpenSSH public key line: '${line%% *} ...' (expected ssh-ed25519, ssh-rsa, ecdsa-sha2-*, or an sk-* security key)" ;;
+    esac
+    out="${out}${line}"$'\n'
+  done <<EOF
+$raw
+EOF
+  [ -n "$out" ] || die "no public key found in the input"
+  printf '%s' "$out"
+}
+
+run_install_authorized_key() {
+  local keys_dir key_file user material existing merged=""
+  keys_dir="$(_norm_path "$CENTRAL_KEYS_DIR")"
+  case "$keys_dir" in
+    /*) ;;
+    *) die "--central-keys needs an absolute directory path (got '$keys_dir')" ;;
+  esac
+  [ -n "$LINK_USERS" ] || die "--install-authorized-key needs --user NAME — whose key is this?"
+  [ "$(emit_user_list | wc -l | tr -d ' ')" -eq 1 ] \
+    || die "--install-authorized-key takes one --user at a time (got '$LINK_USERS')"
+  user="$(emit_user_list)"
+  check_user_name "$user"
+  # Dies when the account has no passwd entry — a key for a user that does
+  # not exist is almost always a typo. Answers from id(1) for the caller's
+  # own name, so this works where getent does not.
+  local target_uid
+  target_uid="$(user_owner "$user")"
+  target_uid="${target_uid%%:*}"
+  key_file="$(central_key_file "$user")"
+
+  # Read and validate the key before touching the filesystem.
+  material="$(read_public_key_material)"
+
+  # Writing under /etc/ssh needs root; a --central-keys directory the
+  # caller already owns does not. Installing somebody else's key does,
+  # because sshd only accepts a path owned by root or by that user.
+  local as_root=0
+  is_root && as_root=1
+  if [ "$as_root" -eq 0 ] && [ "$user" != "$(id -un)" ]; then
+    die "installing a key for '$user' needs root — sshd only reads a key file owned by root or by $user"
+  fi
+  if [ -e "$keys_dir" ]; then
+    [ -d "$keys_dir" ] || die "$keys_dir exists but is not a directory"
+    [ -w "$keys_dir" ] || die "cannot write to $keys_dir — re-run under sudo"
+    # Report an out-of-shape directory, never silently chmod or chown it:
+    # this path may already be serving other people's logins. The rule is
+    # sshd's own (secure_filename): every component owned by root or the
+    # target user, and never group- or world-writable.
+    local d_owner d_mode d_uid problems=""
+    d_owner="$(path_owner "$keys_dir")"
+    d_mode="$(path_mode "$keys_dir")"
+    d_uid="${d_owner%%:*}"
+    if [ "$d_uid" != "0" ] && [ "$d_uid" != "$target_uid" ]; then
+      problems="owned by uid $d_uid, want root (0) or $user ($target_uid)"
+    fi
+    if mode_group_world_writable "$d_mode"; then
+      problems="${problems:+$problems; }mode $d_mode is group- or world-writable"
+    fi
+    if [ -n "$problems" ]; then
+      die "$keys_dir is not in the shape sshd requires ($problems). Fix it deliberately — chown root:root '$keys_dir' && chmod 0755 '$keys_dir' — then re-run. Nothing was written."
+    fi
+  else
+    if [ "$as_root" -eq 1 ]; then
+      install -d -m 0755 -o root -g root "$keys_dir" || die "could not create $keys_dir"
+      log "created $keys_dir (0755 root:root)"
+    else
+      install -d -m 0755 "$keys_dir" || die "could not create $keys_dir"
+      log "created $keys_dir (0755, owned by $user — sshd accepts that for $user's own key)"
+    fi
+  fi
+
+  # An existing key file must already satisfy StrictModes: owned by root
+  # or by the target user, and not group- or world-writable. Report, do
+  # not repair — a key file in the wrong shape is a question about who
+  # put it there.
+  if [ -e "$key_file" ]; then
+    local f_owner f_mode f_uid problems=""
+    f_owner="$(path_owner "$key_file")"
+    f_mode="$(path_mode "$key_file")"
+    f_uid="${f_owner%%:*}"
+    if [ "$f_uid" != "0" ] && [ "$f_uid" != "$target_uid" ]; then
+      problems="owned by uid $f_uid, want root (0) or $user ($target_uid)"
+    fi
+    if mode_group_world_writable "$f_mode"; then
+      problems="${problems:+$problems; }mode $f_mode is group- or world-writable"
+    fi
+    if [ -n "$problems" ]; then
+      die "$key_file is not in the shape sshd requires ($problems) — sshd would refuse it under StrictModes. Fix it deliberately (chown root:root '$key_file' && chmod 0644 '$key_file') then re-run. Nothing was written."
+    fi
+    existing="$(cat "$key_file")"
+  else
+    existing=""
+  fi
+
+  # Append what is missing, never duplicate what is already there.
+  local line added=0 kept=0
+  merged="$existing"
+  [ -n "$merged" ] && merged="${merged%$'\n'}"$'\n'
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if printf '%s' "$merged" | grep -qxF "$line"; then
+      kept=$((kept+1))
+      continue
+    fi
+    merged="${merged}${line}"$'\n'
+    added=$((added+1))
+  done <<EOF
+$material
+EOF
+
+  if [ "$added" -eq 0 ]; then
+    log "$key_file already has that key ($kept line(s) unchanged) — nothing to do"
+  else
+    local staged
+    staged="$(mktemp "${keys_dir}/.${user}.XXXXXX")" || die "could not stage a new $key_file"
+    printf '%s' "$merged" > "$staged" || { rm -f "$staged"; die "could not write $staged"; }
+    chmod 0644 "$staged" || { rm -f "$staged"; die "could not chmod $staged"; }
+    if [ "$as_root" -eq 1 ]; then
+      chown root:root "$staged" || { rm -f "$staged"; die "could not chown $staged"; }
+    fi
+    mv -f "$staged" "$key_file" || { rm -f "$staged"; die "could not move $staged into place"; }
+    local owner_note="0644"
+    [ "$as_root" -eq 1 ] && owner_note="0644 root:root"
+    log "$key_file: $added key(s) added, $kept already present ($owner_note)"
+  fi
+
+  # SELinux: relabel to the directory's default type (etc_t under
+  # /etc/ssh). -F forces it even when a wrong label is already set.
+  if command -v restorecon >/dev/null 2>&1; then
+    if restorecon -F "$keys_dir" "$key_file" 2>/dev/null; then
+      log "restorecon -F applied to $keys_dir and $key_file"
+    else
+      warn "restorecon -F failed on $keys_dir / $key_file — check ls -lZ before trusting this"
+    fi
+  else
+    log "restorecon not installed — no relabel needed on a host without SELinux"
+  fi
+
+  # The key itself needs no reload: sshd reads authorized_keys per
+  # connection. A drop-in copied into sshd_config.d does, so gate that.
+  local sshd_bin=""
+  if command -v sshd >/dev/null 2>&1; then
+    sshd_bin="sshd"
+  elif [ -x /usr/sbin/sshd ]; then
+    sshd_bin="/usr/sbin/sshd"
+  fi
+  if [ -n "$sshd_bin" ]; then
+    if "$sshd_bin" -t >/dev/null 2>&1; then
+      log "sshd -t OK — safe to 'systemctl reload sshd' if you also just copied a drop-in"
+    else
+      warn "sshd -t FAILED — do NOT reload sshd until this passes:"
+      "$sshd_bin" -t 2>&1 | while IFS= read -r line; do warn "  $line"; done
+    fi
+    # Did anything actually point sshd at this file?
+    local resolved
+    resolved="$("$sshd_bin" -T -C "user=$user" 2>/dev/null | grep -i '^authorizedkeysfile' || true)"
+    case "$resolved" in
+      *"$keys_dir"*) log "sshd resolves it for $user: $resolved" ;;
+      "") warn "could not resolve sshd's config for $user — check sshd -T -C user=$user by hand" ;;
+      *) warn "sshd does not look in $keys_dir for $user yet ($resolved)."
+         warn "  emit and install the drop-in: $SELF --emit-ssh-config --central-keys --user $user" ;;
+    esac
+  fi
+
+  log "the key needs no sshd reload — authorized_keys is read per connection"
+  log "prove it is in place, and that nobody else's config moved:"
+  log "  sshd -T -C user=$user | grep -i authorizedkeysfile"
+  log "  sshd -T -C user=SOMEONE-ELSE | grep -i authorizedkeysfile"
+  log "  ls -lZ $key_file"
 }
 
 run_install_fapolicyd() {
@@ -2295,8 +2624,51 @@ sshd_dropin_name() { printf '%s-vscode-%s.conf' "$SSHD_PRIORITY" "$1"; }
 # (typically OTP through PAM, pubkey off) has to survive intact for every
 # account that is not named here.
 write_sshd_user_dropin() {
-  local user="$1" file
+  local user="$1" file keys_note keys_line=""
   file="$(sshd_dropin_name "$user")"
+  if [ "$CENTRAL_KEYS" = "1" ]; then
+    local keys_dir
+    keys_dir="$(_norm_path "$CENTRAL_KEYS_DIR")"
+    # Leading newline: this is interpolated at the end of the
+    # AuthenticationMethods line so an unset value leaves no blank line.
+    keys_line=$'\n'"    AuthorizedKeysFile ${keys_dir}/%u .ssh/authorized_keys"
+    keys_note="$(cat <<EOF
+# CENTRAL KEY DIRECTORY. The AuthorizedKeysFile below names two paths and
+# sshd reads them in order:
+#   1. ${keys_dir}/%u   — root-owned, on local disk, label etc_t
+#   2. .ssh/authorized_keys — the user's own copy, in their home
+# WHY THIS EXISTS: with SELinux enforcing and the use_nfs_home_dirs
+# boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
+# home (the file is labelled nfs_t). Pubkey login fails with "Could not
+# open user ... authorized keys ... Permission denied" in /var/log/secure
+# and an AVC per attempt. restorecon cannot relabel an NFS mount, so the
+# key has to live on a path sshd can always read.
+# WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
+# first writes three denied lines to /var/log/secure and three AVCs, and
+# a hung hard NFS mount named first would stall authentication itself.
+# WHY THE HOME PATH STAYS SECOND: the same file then keeps working
+# unchanged on hosts whose homes are local, so there is nothing to undo
+# if this user moves or the mount changes.
+# WHAT sshd REQUIRES of the file (StrictModes): owned by root or by
+# ${user}, and not group- or world-writable. 0644 root:root is what
+# --install-authorized-key writes; the directory is 0755 root:root.
+# AuthorizedKeysCommand (FreeIPA: sss_ssh_authorizedkeys) is a separate
+# mechanism and is untouched by this file.
+EOF
+)"
+  else
+    keys_note="$(cat <<EOF
+# THE KEY ITSELF is not configured here: either
+# ~${user}/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
+# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
+# resolves keys through AuthorizedKeysCommand (FreeIPA:
+# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
+# arrangement is disturbed. On a host whose homes are on NFS with
+# SELinux enforcing, sshd cannot read the home copy at all — see
+# --central-keys and --install-authorized-key.
+EOF
+)"
+  fi
   cat <<EOF
 # WHERE THIS GOES — THIS Linux host as root, NOT the laptop
 #   /etc/ssh/sshd_config.d/${file}
@@ -2344,12 +2716,7 @@ write_sshd_user_dropin() {
 # "publickey password,keyboard-interactive". Drop the second alternative
 # once the key works if the site wants ${user} on pubkey only.
 #
-# THE KEY ITSELF is not configured here: either
-# ~${user}/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
-# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
-# resolves keys through AuthorizedKeysCommand (FreeIPA:
-# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
-# arrangement is disturbed.
+${keys_note}
 #
 # NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
 # client IP after a hung OTP prompt) is global-only. If operators get
@@ -2357,7 +2724,7 @@ write_sshd_user_dropin() {
 
 Match User ${user}
     PubkeyAuthentication yes
-    AuthenticationMethods publickey keyboard-interactive
+    AuthenticationMethods publickey keyboard-interactive${keys_line}
     # Remote-SSH tunnels its server over the session. Both are sshd
     # defaults, restated for ${user} in case the baseline turns them off.
     AllowTcpForwarding yes
@@ -2380,6 +2747,10 @@ if [ "$ACTION" = "emit-ssh-config" ]; then
 fi
 if [ "$ACTION" = "link-home" ]; then
   run_link_home
+  exit 0
+fi
+if [ "$ACTION" = "install-authorized-key" ]; then
+  run_install_authorized_key
   exit 0
 fi
 if [ "$ACTION" = "install-fapolicyd" ]; then
