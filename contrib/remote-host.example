@@ -1,22 +1,60 @@
 # WHERE THIS GOES — THIS Linux host as root, NOT the laptop
-#   /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf
+#   /etc/ssh/sshd_config.d/50-vscode-youruser.conf
 #   then: sshd -t && systemctl reload sshd
 #
-# Pubkey first (sshd default is already yes — this drop-in makes it
-# explicit). A key in ~/.ssh/authorized_keys OR the realm's SSH pubkey
-# store authenticates extra Remote-SSH channels without a TOTP prompt.
-# keyboard-interactive stays on so first-time / OTP login still works.
-# Do NOT set AuthenticationMethods to keyboard-interactive only — that
-# is what forces the token prompt on every channel.
-# remote.SSH.* keys do not go here.
+# PROVE IT — the only check that counts:
+#   sshd -T -C user=youruser | grep -E 'pubkeyauth|authenticationmethods'
+#     -> pubkeyauthentication yes
+#     -> authenticationmethods publickey keyboard-interactive
+#   sshd -T -C user=SOMEONE-ELSE | grep -E 'pubkeyauth|authenticationmethods'
+#     -> unchanged, still this host's hardened baseline
+#
+# EL8's stock sshd_config has no Include line, so this whole directory is
+# ignored there until an admin adds, at the TOP of /etc/ssh/sshd_config:
+#   Include /etc/ssh/sshd_config.d/*.conf
+# EL9 and Debian/Ubuntu ship it already. The check above says which case
+# this host is in.
+#
+# PER-USER ON PURPOSE. Every directive sits inside Match User youruser, so
+# no other account changes. Remote-SSH opens more than one SSH channel
+# and a realm TOTP is anti-replay inside its 30-second window, so the
+# second channel is denied unless a key can authenticate it. That is why
+# this one user needs pubkey, and why nobody else has to.
+#
+# ONE FILE PER USER. A colleague gets their own
+# 50-vscode-<name>.conf: adding them never edits this file,
+# and re-emitting for youruser rewrites only this one.
+#
+# AuthenticationMethods: space-separated entries are ALTERNATIVES,
+# comma-separated entries are ALL REQUIRED. "publickey
+# keyboard-interactive" means the key alone is enough, while the OTP path
+# still works for the first login before the key is installed. Never
+# write "publickey,keyboard-interactive" — that demands both and puts the
+# OTP prompt back on every channel, which is the problem this solves. If
+# the baseline needs more than keyboard-interactive on its own, restate
+# it as the second alternative, e.g.
+# "publickey password,keyboard-interactive". Drop the second alternative
+# once the key works if the site wants youruser on pubkey only.
+#
+# THE KEY ITSELF is not configured here: either
+# ~youruser/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
+# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
+# resolves keys through AuthorizedKeysCommand (FreeIPA:
+# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
+# arrangement is disturbed.
+#
+# NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
+# client IP after a hung OTP prompt) is global-only. If operators get
+# locked out, an admin adds it to the host's own hardening file.
 
-PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
-PasswordAuthentication yes
-KbdInteractiveAuthentication yes
-UsePAM yes
-AllowTcpForwarding yes
-AllowStreamLocalForwarding yes
-# OpenSSH 9.9+ bans the client IP after a hung OTP prompt.
-# Replace with the operator workstation CIDRs.
-PerSourcePenaltyExemptList 192.0.2.0/24,198.51.100.0/24
+Match User youruser
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey keyboard-interactive
+    # Remote-SSH tunnels its server over the session. Both are sshd
+    # defaults, restated for youruser in case the baseline turns them off.
+    AllowTcpForwarding yes
+    AllowStreamLocalForwarding yes
+
+# Back to global scope. Anything appended below this line applies to
+# every user, not to youruser. Keep it last.
+Match all

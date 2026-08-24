@@ -25,6 +25,7 @@ readonly DEFAULT_BIND_ADDR="127.0.0.1"
 readonly DEFAULT_PORT="8000"
 readonly DEFAULT_SERVER_ARCH="linux-x64"
 readonly DEFAULT_FAPOLICYD_PRIORITY="25"
+readonly DEFAULT_SSHD_PRIORITY="50"
 readonly VSCODE_GIT_REPO="https://github.com/microsoft/vscode.git"
 readonly DEFAULT_TAG_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vscode-airgap"
 readonly DEFAULT_TAG_CACHE_TTL="86400"   # 24h — tags don't change often enough to justify refetching every run
@@ -51,6 +52,7 @@ LINK_HOME="${LINK_HOME:-0}"
 LINK_USERS="${LINK_USERS:-}"
 INSTALL_FAPOLICYD="${INSTALL_FAPOLICYD:-0}"
 FAPOLICYD_PRIORITY="${FAPOLICYD_PRIORITY:-$DEFAULT_FAPOLICYD_PRIORITY}"
+SSHD_PRIORITY="${SSHD_PRIORITY:-$DEFAULT_SSHD_PRIORITY}"
 WITH_SERVE_WEB=0          # --serve-web: also fetch+optionally start code serve-web
 WITH_CLI=0                # implied by --serve-web or --tunnel
 LIST_VERSIONS="${LIST_VERSIONS:-0}"
@@ -244,13 +246,17 @@ OPTIONS (env var equivalents in parentheses)
   --download-only         Fetch/verify artifacts but do not install/start.
   --status                Print install state for INSTALL_DIR and exit.
                           Standalone — no MODE/network/curl required.
-  --emit-ssh-config       Write four templates into INSTALL_DIR and
-                          print where each one is copied (laptop
-                          ~/.ssh/config, laptop VS Code user
-                          settings.json, this host's sshd drop-in,
-                          fapolicyd rules.d snippet). JSONC //
-                          comments, not fake "// key" pairs.
+  --emit-ssh-config       Write the templates into INSTALL_DIR and print
+                          where each one is copied (laptop ~/.ssh/config,
+                          laptop VS Code user settings.json, fapolicyd
+                          rules.d snippet, and ONE sshd drop-in per
+                          --user: <sshd-priority>-vscode-<user>.conf,
+                          scoped to `Match User <user>` so the host's
+                          hardened baseline is untouched for everyone
+                          else). Defaults to the user running it. JSONC
+                          // comments, not fake "// key" pairs.
                           Standalone — no MODE/network required.
+                          See MULTI-USER, ONE HOST.
   --shared                Force world-readable modes on INSTALL_DIR
                           (0755 dirs/bins, 0644 files). Implied when
                           INSTALL_DIR is not under $HOME. (SHARED=1)
@@ -259,11 +265,17 @@ OPTIONS (env var equivalents in parentheses)
                           ~/.vscode-server (or --user's home) to
                           INSTALL_DIR. User-writable state (data,
                           extensions, the per-commit .token) stays
-                          in the home tree. (LINK_HOME=1)
+                          in the home tree. Run as root, the
+                          directories and symlinks it creates are
+                          chowned to that user — see OWNERSHIP UNDER
+                          sudo. (LINK_HOME=1)
   --user NAME             With --link-home: operate on NAME's home
-                          instead of $HOME. Repeatable / comma-list
-                          via --link-users. Root required for another
-                          user. (LINK_USERS)
+                          instead of $HOME. With --emit-ssh-config:
+                          write NAME's sshd drop-in. Repeatable /
+                          comma-list via --link-users, and each named
+                          user gets their own file. Root required to
+                          link another user's home; NAME's home must
+                          already exist. (LINK_USERS)
   --link-users LIST       Comma-separated user names for --link-home.
   --install-fapolicyd     As root: write
                           /etc/fapolicyd/rules.d/<priority>-vscode-server.rules
@@ -274,15 +286,83 @@ OPTIONS (env var equivalents in parentheses)
   --fapolicyd-priority N  rules.d filename prefix, default 25 (before
                           the 30-patterns.rules ld_so deny and the 90
                           catch-all). (FAPOLICYD_PRIORITY)
+  --sshd-priority N       sshd_config.d filename prefix for the
+                          emitted per-user drop-in, default 50. Raise
+                          it only if another drop-in already carries a
+                          Match block for the same user — a Match
+                          override beats the global baseline whatever
+                          the order. (SSHD_PRIORITY)
   --force                 Re-download even if a matching cached artifact
                           already exists. With --link-home: replace a
-                          real presence-test path with a symlink.
+                          real presence-test path with a symlink. With
+                          --install-fapolicyd: rewrite and reload even
+                          when the rule file is already identical.
   -h, --help              This text.
 
 PROXY
   HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured for every download —
   curl reads them natively, and the extension-query helper (Python's
   urllib) picks up the same standard env vars.
+
+OWNERSHIP UNDER sudo
+  Running as root is the normal way to do a shared install
+  (--install-dir /opt/vscode-server --link-home --user NAME
+  --install-fapolicyd). Remote-SSH connects AS that user and writes
+  data/, logs and a per-commit .token under ~/.vscode-server, so
+  anything root creates inside a home is chowned back to that user —
+  a root-owned tree fails the first connection with permission denied.
+
+  --link-home --user NAME   ~NAME/.vscode-server plus bin/, cli/,
+                            cli/servers/ and every symlink this run
+                            creates end up owned by NAME. A directory
+                            an earlier root run left behind is repaired
+                            too. Paths NAME already owns (data/,
+                            extensions/, tokens) are never touched.
+                            NAME's home must exist — this never creates
+                            it.
+  --mode online|offline     Only paths root actually owns under
+                            INSTALL_DIR are handed over, and only when
+                            INSTALL_DIR sits inside a user's home. A
+                            shared tree (/opt/vscode-server) and root's
+                            own /root/.vscode-server stay root-owned,
+                            which is what --shared and the fapolicyd
+                            allow-list want.
+
+  sudo resets HOME to /root on most distributions, so a bare
+  `sudo vscode-airgap.sh --mode offline ...` installs into
+  /root/.vscode-server, not the login user's home. Pass --install-dir
+  explicitly, or install as the user who will connect.
+
+MULTI-USER, ONE HOST
+  Several people share the air-gapped host, and onboarding the second
+  one must leave the first — and everyone who is not using VS Code at
+  all — exactly as they were. Every part of this is additive per user.
+
+  sshd        --emit-ssh-config --user NAME writes
+              <sshd-priority>-vscode-NAME.conf, and every directive in
+              it sits inside `Match User NAME`. The host's hardened
+              baseline (pubkey off globally, OTP through PAM) still
+              governs every other account. A colleague is a second
+              file, never an edit to the first, and re-emitting for
+              NAME rewrites only NAME's file. Checked against OpenSSH
+              8.0p1, 9.9p1 and 10.0p2:
+                sshd -T -C user=NAME          -> pubkeyauthentication yes
+                sshd -T -C user=SOMEONE-ELSE  -> baseline, unchanged
+              Drop-ins are read at the Include line in lexical order,
+              and a Match inside one does not scope the next file or
+              the rest of the parent. EL8 ships no Include line at all,
+              so add `Include /etc/ssh/sshd_config.d/*.conf` at the TOP
+              of /etc/ssh/sshd_config there or the directory is dead
+              weight. The sshd -T check tells you which case you are in.
+  fapolicyd   One shared rule for INSTALL_DIR, not one per user.
+              --install-fapolicyd rewrites it only when the content
+              actually changed, so a second admin's run does not bounce
+              fapolicyd (and its decision cache) for the whole host.
+  --link-home Already per user: it touches only ~NAME/.vscode-server and
+              chowns what it creates to NAME, so a run for a colleague
+              leaves the first user's links and ownership untouched.
+  install     One shared /opt/vscode-server tree that every user
+              executes. Nothing user-specific lives in it.
 
 EXAMPLES
   # Online side: latest stable, install Remote-SSH server + both client
@@ -300,8 +380,15 @@ EXAMPLES
     --install-dir /opt/vscode-server --link-home --user youruser \
     --install-fapolicyd
 
-  # Print ssh_config + JSONC settings.json + sshd drop-in + fapolicyd rule
-  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server
+  # Print ssh_config + JSONC settings.json + fapolicyd rule + one
+  # Match-scoped sshd drop-in per user
+  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+    --user alice --user bob
+
+  # Onboard a colleague later: their own sshd file, their own links,
+  # nothing of alice's rewritten
+  sudo ./vscode-airgap.sh --link-home --user carol --install-dir /opt/vscode-server
+  ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server --user carol
 
   # Optional secondary path: serve-web instead of / alongside Remote-SSH
   ./vscode-airgap.sh --mode online --serve-web
@@ -394,6 +481,7 @@ while [ $# -gt 0 ]; do
       ;;
     --install-fapolicyd) INSTALL_FAPOLICYD=1; shift ;;
     --fapolicyd-priority) FAPOLICYD_PRIORITY="$2"; shift 2 ;;
+    --sshd-priority) SSHD_PRIORITY="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --refresh) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -651,7 +739,13 @@ resolve_commit_via_commits_api() {
 
 tag_cache_file() {
   [ "$CHANNEL" = "stable" ] || die "--version / --list-versions only supports channel=stable (insider builds aren't semver-tagged in microsoft/vscode — see docs/reference/download-urls.md; use --commit for insider)"
+  # sudo -E keeps HOME/XDG_CACHE_HOME, so root can end up creating this
+  # cache inside a user's home. Hand it back or their next non-root run
+  # cannot refresh it.
+  local cache_owner
+  cache_owner="$(owner_for_tree "$TAG_CACHE_DIR")"
   mkdir -p "$TAG_CACHE_DIR"
+  own_paths "$cache_owner" "$TAG_CACHE_DIR"
   echo "$TAG_CACHE_DIR/tags-stable.tsv"
 }
 
@@ -743,6 +837,10 @@ PYEOF
   rm -f "$raw_file"
   [ -s "$tmp" ] || { rm -f "$tmp"; die "tag cache refresh produced an empty file"; }
   mv -f "$tmp" "$cache_file"
+  # mktemp gives 0600; the cache holds public git tags and has to stay
+  # readable to the user who owns the cache directory.
+  chmod 0644 "$cache_file"
+  own_paths "$(owner_for_tree "$cache_file")" "$cache_file"
   log "tag cache written: $cache_file"
 }
 
@@ -1309,6 +1407,8 @@ write_manifest() {
 # ── BUNDLE mode ───────────────────────────────────────────────────────────
 run_bundle() {
   [ -n "$BUNDLE_PATH" ] || die "--bundle-path is required in bundle mode"
+  local bundle_owner
+  bundle_owner="$(owner_for_tree "$BUNDLE_PATH")"
   _STAGE_DIR="$(mktemp -d)"
   trap cleanup_stage_dir EXIT
   stage_artifacts "$_STAGE_DIR"
@@ -1316,6 +1416,8 @@ run_bundle() {
   # macOS tar otherwise writes LIBARCHIVE.xattr.com.apple.provenance
   # headers; GNU tar on the air-gapped host warns and ignores them.
   COPYFILE_DISABLE=1 tar -C "$_STAGE_DIR" --exclude='._*' -czf "$BUNDLE_PATH" .
+  # A bundle root writes into a user's home stays theirs to carry away.
+  own_paths "$bundle_owner" "$BUNDLE_PATH"
   log "bundle written: $BUNDLE_PATH ($(du -h "$BUNDLE_PATH" | awk '{print $1}'))"
   log "carry this file across the air gap, log in as the SAME user Remote-SSH" \
       "will connect as, then run:"
@@ -1439,13 +1541,92 @@ user_home_of() {
   printf '%s' "$home"
 }
 
+# ── Ownership when this script runs as root ────────────────────────────
+# Root is the normal way to do a shared install, link another user's
+# home, or write fapolicyd rules — and every mkdir/ln/cp/tar it does
+# inside a user's home otherwise leaves root-owned paths there.
+# Remote-SSH connects AS that user and writes data/, logs and a
+# per-commit .token under ~/.vscode-server, so a root-owned tree fails
+# the first connection with permission denied. Hand back what root
+# created; never touch what the user already owns.
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
+# path_owner <path> — "uid:gid" of PATH itself; symlinks are NOT
+# followed. Empty when PATH does not exist. Same GNU/BSD split as
+# file_mtime: never chain `stat -f` onto `stat -c` in one || run, since
+# -f is --file-system on coreutils, not a format string.
+path_owner() {
+  local p="${1:-}" out=""
+  { [ -n "$p" ] && { [ -e "$p" ] || [ -L "$p" ]; }; } || return 0
+  out="$(stat -c '%u:%g' "$p" 2>/dev/null || true)"
+  if [ -z "$out" ]; then
+    out="$(stat -f '%u:%g' "$p" 2>/dev/null || true)"
+  fi
+  printf '%s' "$out"
+}
+
+# user_owner <name> — "uid:gid" from passwd. id(1) for the current user,
+# so this still answers where the account has no local passwd entry.
+user_owner() {
+  local user="${1:-}" ent
+  if [ -z "$user" ] || [ "$user" = "$(id -un)" ]; then
+    printf '%s:%s' "$(id -u)" "$(id -g)"
+    return
+  fi
+  ent="$(getent passwd "$user" 2>/dev/null || true)"
+  [ -n "$ent" ] || die "no passwd entry for user '$user'"
+  printf '%s' "$ent" | awk -F: '{printf "%s:%s", $3, $4}'
+}
+
+# owner_for_tree <path> — who anything created at PATH should belong to,
+# taken from PATH's nearest existing parent. Empty when there is nothing
+# to hand back: not root, or that parent is root's own — /opt/vscode-server
+# and /root/.vscode-server are supposed to stay root-owned.
+owner_for_tree() {
+  local p parent owner
+  is_root || return 0
+  p="$(_norm_path "${1:-}")"
+  parent="$(dirname "$p")"
+  while [ ! -d "$parent" ] && [ "$parent" != "/" ] && [ "$parent" != "." ]; do
+    parent="$(dirname "$parent")"
+  done
+  owner="$(path_owner "$parent")"
+  case "$owner" in
+    ''|0:*) return 0 ;;
+    *) printf '%s' "$owner" ;;
+  esac
+}
+
+# own_paths <uid:gid> <path>... — chown, with -h so a symlink's own
+# ownership changes rather than its target's.
+own_paths() {
+  local owner="${1:-}"
+  shift || true
+  { [ -n "$owner" ] && [ "$owner" != "0:0" ] && [ "$#" -gt 0 ]; } || return 0
+  chown -h "$owner" "$@" 2>/dev/null || warn "could not chown to $owner: $*"
+}
+
+# reown_root_created <uid:gid> <root> — hand over only what root owns
+# under ROOT, so a user's own data/, extensions/ and tokens are left
+# exactly as they are.
+reown_root_created() {
+  local owner="${1:-}" root="${2:-}"
+  { [ -n "$owner" ] && [ "$owner" != "0:0" ] && [ -d "$root" ]; } || return 0
+  log "handing root-created paths under $root to uid:gid $owner"
+  find "$root" -uid 0 -exec chown -h "$owner" {} + 2>/dev/null \
+    || warn "could not hand every root-created path under $root to $owner"
+}
+
 # Symlink Remote-SSH presence-test files from dest_root to INSTALL_DIR.
 # Leaves data/, extensions/, .*.token, logs as real files in dest_root.
+# As root every path below is created root-owned in $user's home unless
+# it is chowned back — see the ownership helpers above.
 link_one_user() {
   local user="$1"
-  local dest_root src commit dest
+  local dest_root src commit dest home owner="" owned=""
   src="$(_norm_path "$INSTALL_DIR")"
-  dest_root="$(user_home_of "$user")/.vscode-server"
+  home="$(user_home_of "$user")"
+  dest_root="$home/.vscode-server"
   if [ "$src" = "$(_norm_path "$dest_root")" ]; then
     log "link-home: $user already uses $src as INSTALL_DIR — nothing to link"
     return 0
@@ -1456,7 +1637,25 @@ link_one_user() {
   fi
   commit="$(json_field "$src/versions.json" commit)"
   [ -n "$commit" ] || die "versions.json at $src has no commit"
+  # mkdir -p would otherwise create the home directory itself, root-owned.
+  [ -d "$home" ] || die "home directory does not exist: $home (create $user's home before linking)"
+
+  is_root && owner="$(user_owner "$user")"
+  # Chown the directories this run creates, plus any an earlier root run
+  # left behind — repairing those is the point. Directories already owned
+  # by $user are not touched.
+  local reown=() d
+  for d in "$dest_root" "$dest_root/bin" "$dest_root/cli" "$dest_root/cli/servers"; do
+    if [ ! -d "$d" ]; then
+      reown+=("$d")
+    else
+      case "$(path_owner "$d")" in 0:*) reown+=("$d") ;; esac
+    fi
+  done
   mkdir -p "$dest_root/bin" "$dest_root/cli/servers"
+  if [ "${#reown[@]}" -gt 0 ]; then
+    own_paths "$owner" "${reown[@]}"
+  fi
 
   _link_replace() {
     local from="$1" to="$2"
@@ -1464,6 +1663,7 @@ link_one_user() {
       local cur
       cur="$(readlink "$to")"
       if [ "$cur" = "$from" ]; then
+        own_paths "$owner" "$to"
         return 0
       fi
       rm -f "$to"
@@ -1475,6 +1675,7 @@ link_one_user() {
       fi
     fi
     ln -s "$from" "$to"
+    own_paths "$owner" "$to"
   }
 
   [ -d "$src/bin/$commit" ] && _link_replace "$src/bin/$commit" "$dest_root/bin/$commit"
@@ -1486,7 +1687,8 @@ link_one_user() {
   [ -e "$src/vscode-cli-$commit.tar.gz.done" ] \
     && _link_replace "$src/vscode-cli-$commit.tar.gz.done" "$dest_root/vscode-cli-$commit.tar.gz.done"
   [ -f "$src/versions.json" ] && _link_replace "$src/versions.json" "$dest_root/versions.json"
-  log "linked Remote-SSH presence tests for $user: $dest_root -> $src (commit ${commit:0:12}...)"
+  [ -n "$owner" ] && owned=" [owned by $user, uid:gid $owner]"
+  log "linked Remote-SSH presence tests for $user: $dest_root -> $src (commit ${commit:0:12}...)${owned}"
 }
 
 run_link_home() {
@@ -1535,8 +1737,24 @@ run_install_fapolicyd() {
   dir="$(_norm_path "$INSTALL_DIR")"
   [ -d "$dir" ] || die "INSTALL_DIR does not exist: $dir (install the server first)"
   dest="/etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
-  write_fapolicyd_example > "$dest"
-  chmod 0644 "$dest"
+  # One shared rule for the whole host, so a second admin onboarding a
+  # second user re-runs this and changes nothing. Only reload fapolicyd
+  # when the content actually moved: an unnecessary restart drops the
+  # decision cache for every process on the box.
+  local staged
+  staged="$(mktemp)"
+  write_fapolicyd_example > "$staged"
+  if [ "$FORCE" != "1" ] && [ -f "$dest" ] \
+      && [ "$(sha256_of "$staged")" = "$(sha256_of "$dest" || true)" ]; then
+    rm -f "$staged"
+    log "$dest is already current — leaving fapolicyd alone"
+    log "  (pass --force to rewrite and reload anyway, e.g. if an earlier run"
+    log "   wrote the file but never got as far as loading it)"
+    log "fapolicyd allow-lists dir=${dir}/"
+    return 0
+  fi
+  chmod 0644 "$staged"
+  mv -f "$staged" "$dest"
   log "wrote $dest"
   if command -v fagenrules >/dev/null 2>&1; then
     fagenrules --load
@@ -1552,9 +1770,12 @@ run_install_fapolicyd() {
 # ── Shared install step (used by online + offline) ───────────────────────
 install_from_stage() {
   local stage_dir="$1"
-  local commit
+  local commit install_owner
   commit="$(json_field "$stage_dir/versions.json" commit)"
   [ -n "$commit" ] || die "versions.json has no commit field"
+  # Resolve before anything is created: once root has made INSTALL_DIR,
+  # its own ownership no longer says whose tree this is.
+  install_owner="$(owner_for_tree "$INSTALL_DIR")"
 
   # THE critical path: extract straight into INSTALL_DIR/bin/<commit>/ —
   # exactly where Remote-SSH looks on its own. The tarball's single
@@ -1664,6 +1885,7 @@ install_from_stage() {
 
   cp -f "$stage_dir/versions.json" "$INSTALL_DIR/versions.json"
   apply_shared_perms "$INSTALL_DIR"
+  reown_root_created "$install_owner" "$INSTALL_DIR"
   log "install complete. versions: $INSTALL_DIR/versions.json"
   if want_shared && [ "$LINK_HOME" != "1" ]; then
     log "INSTALL_DIR is not ~/.vscode-server. Remote-SSH still looks there unless you"
@@ -1693,7 +1915,12 @@ install_from_stage() {
   else
     log "Remote-SSH server is staged and ready."
     log "Print templates AND the destination path for each file:"
-    log "  $SELF --emit-ssh-config"
+    if [ -n "$LINK_USERS" ]; then
+      log "  $SELF --emit-ssh-config --install-dir $INSTALL_DIR --user $LINK_USERS"
+      log "  (one Match-scoped sshd drop-in per user; nobody else's login changes)"
+    else
+      log "  $SELF --emit-ssh-config"
+    fi
   fi
 }
 
@@ -1710,6 +1937,7 @@ resolve_token() {
   if [ ! -f "$tok_file" ]; then
     ( umask 077; openssl rand -hex 32 > "$tok_file" 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$tok_file" )
     chmod 600 "$tok_file"
+    own_paths "$(owner_for_tree "$INSTALL_DIR")" "$tok_file"
     log "generated a new connection token: $tok_file (chmod 600, not printed)"
   else
     log "reusing existing connection token: $tok_file"
@@ -1779,22 +2007,32 @@ run_status() {
 
 # ── emit-ssh-config ────────────────────────────────────────────────────
 run_emit_ssh_config() {
+  local emit_owner
+  emit_owner="$(owner_for_tree "$INSTALL_DIR")"
   mkdir -p "$INSTALL_DIR"
   local ssh_out="$INSTALL_DIR/ssh-config.example"
   local settings_out="$INSTALL_DIR/settings.json.example"
-  local remote_out="$INSTALL_DIR/remote-host.example"
   local fapo_out="$INSTALL_DIR/fapolicyd-vscode.rules"
   write_ssh_config_example > "$ssh_out"
   write_settings_json_example > "$settings_out"
-  write_remote_host_example > "$remote_out"
   write_fapolicyd_example > "$fapo_out"
+  # One sshd drop-in per user, named after the user: emitting for a
+  # colleague later never rewrites this one.
+  local sshd_outs=() u one
+  for u in $(emit_user_list); do
+    check_user_name "$u"
+    one="$INSTALL_DIR/$(sshd_dropin_name "$u")"
+    write_sshd_user_dropin "$u" > "$one"
+    sshd_outs+=("$one")
+  done
+  reown_root_created "$emit_owner" "$INSTALL_DIR"
   log "wrote templates under $INSTALL_DIR"
   log "These are NOT live. Copy/merge each file to the path below."
   log ""
   log "  $ssh_out"
   log "    WHO:  operator laptop (not this host)"
   log "    Unix/macOS ->  ~/.ssh/config"
-  log "    Windows    ->  C:\\Users\\youruser\\.ssh\\config"
+  log "    Windows    ->  %USERPROFILE%\\.ssh\\config"
   log "    HOW:  merge ONE Host block (Unix or Windows), replace"
   log "          airgapped-host / youruser / the hostname / IdentityFile"
   log ""
@@ -1808,11 +2046,21 @@ run_emit_ssh_config() {
   log "          Or: VS Code -> Preferences -> Settings -> Open Settings (JSON)"
   log "          Omit remote.SSH.path on Unix. UTF-8, no BOM."
   log ""
-  log "  $remote_out"
-  log "    WHO:  THIS Linux host, as root (not the laptop)"
-  log "    PUT:  /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf"
-  log "    HOW:  copy the file, then sshd -t && systemctl reload sshd"
-  log ""
+  local one_out one_user
+  for one_out in "${sshd_outs[@]}"; do
+    one_user="$(basename "$one_out")"
+    one_user="${one_user#"$SSHD_PRIORITY"-vscode-}"
+    one_user="${one_user%.conf}"
+    log "  $one_out"
+    log "    WHO:  THIS Linux host, as root (not the laptop)"
+    log "    PUT:  /etc/ssh/sshd_config.d/$(basename "$one_out")"
+    log "    HOW:  copy, then sshd -t && systemctl reload sshd"
+    log "    PROVE: sshd -T -C user=$one_user | grep -E 'pubkeyauth|authenticationmethods'"
+    log "           sshd -T -C user=SOMEONE-ELSE  # must still show the host's baseline"
+    log "    NOTE: one file per user. A colleague gets their own"
+    log "          $SELF --emit-ssh-config --user THEIRNAME; this file is not touched."
+    log ""
+  done
   log "  $fapo_out"
   log "    WHO:  THIS Linux host, as root, if fapolicyd is enforcing"
   log "    PUT:  /etc/fapolicyd/rules.d/${FAPOLICYD_PRIORITY}-vscode-server.rules"
@@ -1824,14 +2072,20 @@ write_ssh_config_example() {
   cat <<'EOF'
 # WHERE THIS GOES — operator laptop, NOT the remote host
 #   Unix/macOS:  ~/.ssh/config
-#   Windows:     C:\Users\youruser\.ssh\config
-# Merge ONE Host block. Replace the host / realm / user placeholders.
+#   Windows:     %USERPROFILE%\.ssh\config  (C:\Users\youruser\.ssh\config)
+# Merge ONE Host block. Both below use the same alias and OpenSSH takes
+# the FIRST value it reads for each keyword, so keeping both leaves the
+# second one dead. Replace the host / realm / user placeholders.
 # Unix after merge: mkdir -p ~/.ssh/sockets
 #
 # publickey is first so Remote-SSH extra channels skip the OTP prompt
 # once the key is in authorized_keys (or the realm SSH pubkey store).
 # keyboard-interactive stays as the fallback for first-time / OTP login.
 # Uncomment IdentityFile and point it at the matching private key.
+# Windows: ssh-agent is a Windows service, off by default. As admin,
+#   Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent
+#   ssh-add $env:USERPROFILE\.ssh\id_ed25519
+# An unencrypted key needs no agent — IdentityFile alone is enough.
 
 # Unix / macOS — ControlMaster reuses a session; pubkey skips OTP.
 Host airgapped-host
@@ -1857,7 +2111,9 @@ Host airgapped-host
     Port 22
     PreferredAuthentications publickey,keyboard-interactive
     PubkeyAuthentication yes
-    # IdentityFile C:\Users\youruser\.ssh\id_ed25519
+    # Win32-OpenSSH expands ~ to %USERPROFILE%; the absolute form
+    # C:\Users\youruser\.ssh\id_ed25519 works too.
+    # IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly no
     GSSAPIAuthentication no
     NumberOfPasswordPrompts 3
@@ -1916,6 +2172,11 @@ ${extra}
   // Windows only — native OpenSSH optional feature.
   "remote.SSH.path": "C:\\\\Windows\\\\System32\\\\OpenSSH\\\\ssh.exe",
 
+  // Only if your ssh config is NOT at the default path (~/.ssh/config,
+  // on Windows %USERPROFILE%\\.ssh\\config). It must contain the same
+  // Host alias as remote.SSH.remotePlatform below.
+  // "remote.SSH.configFile": "C:\\\\Users\\\\youruser\\\\.ssh\\\\config",
+
   // Host alias must match the ssh config Host name.
   "remote.SSH.remotePlatform": {
     "airgapped-host": "linux"
@@ -1924,30 +2185,91 @@ ${extra}
 EOF
 }
 
-write_remote_host_example() {
-  cat <<'EOF'
+# Which users --emit-ssh-config writes an sshd drop-in for: --user /
+# --link-users when given, otherwise whoever is running it.
+emit_user_list() {
+  local users="$LINK_USERS"
+  [ -n "$users" ] || users="$(id -un)"
+  printf '%s' "$users" | tr ', ' '\n' | grep -v '^$' || true
+}
+
+# The name lands in a filename and in a `Match User` line, so hold it to
+# what an account name may contain.
+check_user_name() {
+  case "${1:-}" in
+    ''|*[!A-Za-z0-9._-]*) die "invalid user name '${1:-}' for an sshd drop-in (letters, digits, . _ - only)" ;;
+  esac
+}
+
+sshd_dropin_name() { printf '%s-vscode-%s.conf' "$SSHD_PRIORITY" "$1"; }
+
+# Per-user sshd override. Nothing global: the host's hardened baseline
+# (typically OTP through PAM, pubkey off) has to survive intact for every
+# account that is not named here.
+write_sshd_user_dropin() {
+  local user="$1" file
+  file="$(sshd_dropin_name "$user")"
+  cat <<EOF
 # WHERE THIS GOES — THIS Linux host as root, NOT the laptop
-#   /etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf
+#   /etc/ssh/sshd_config.d/${file}
 #   then: sshd -t && systemctl reload sshd
 #
-# Pubkey first (sshd default is already yes — this drop-in makes it
-# explicit). A key in ~/.ssh/authorized_keys OR the realm's SSH pubkey
-# store authenticates extra Remote-SSH channels without a TOTP prompt.
-# keyboard-interactive stays on so first-time / OTP login still works.
-# Do NOT set AuthenticationMethods to keyboard-interactive only — that
-# is what forces the token prompt on every channel.
-# remote.SSH.* keys do not go here.
+# PROVE IT — the only check that counts:
+#   sshd -T -C user=${user} | grep -E 'pubkeyauth|authenticationmethods'
+#     -> pubkeyauthentication yes
+#     -> authenticationmethods publickey keyboard-interactive
+#   sshd -T -C user=SOMEONE-ELSE | grep -E 'pubkeyauth|authenticationmethods'
+#     -> unchanged, still this host's hardened baseline
+#
+# EL8's stock sshd_config has no Include line, so this whole directory is
+# ignored there until an admin adds, at the TOP of /etc/ssh/sshd_config:
+#   Include /etc/ssh/sshd_config.d/*.conf
+# EL9 and Debian/Ubuntu ship it already. The check above says which case
+# this host is in.
+#
+# PER-USER ON PURPOSE. Every directive sits inside Match User ${user}, so
+# no other account changes. Remote-SSH opens more than one SSH channel
+# and a realm TOTP is anti-replay inside its 30-second window, so the
+# second channel is denied unless a key can authenticate it. That is why
+# this one user needs pubkey, and why nobody else has to.
+#
+# ONE FILE PER USER. A colleague gets their own
+# ${SSHD_PRIORITY}-vscode-<name>.conf: adding them never edits this file,
+# and re-emitting for ${user} rewrites only this one.
+#
+# AuthenticationMethods: space-separated entries are ALTERNATIVES,
+# comma-separated entries are ALL REQUIRED. "publickey
+# keyboard-interactive" means the key alone is enough, while the OTP path
+# still works for the first login before the key is installed. Never
+# write "publickey,keyboard-interactive" — that demands both and puts the
+# OTP prompt back on every channel, which is the problem this solves. If
+# the baseline needs more than keyboard-interactive on its own, restate
+# it as the second alternative, e.g.
+# "publickey password,keyboard-interactive". Drop the second alternative
+# once the key works if the site wants ${user} on pubkey only.
+#
+# THE KEY ITSELF is not configured here: either
+# ~${user}/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
+# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
+# resolves keys through AuthorizedKeysCommand (FreeIPA:
+# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
+# arrangement is disturbed.
+#
+# NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
+# client IP after a hung OTP prompt) is global-only. If operators get
+# locked out, an admin adds it to the host's own hardening file.
 
-PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
-PasswordAuthentication yes
-KbdInteractiveAuthentication yes
-UsePAM yes
-AllowTcpForwarding yes
-AllowStreamLocalForwarding yes
-# OpenSSH 9.9+ bans the client IP after a hung OTP prompt.
-# Replace with the operator workstation CIDRs.
-PerSourcePenaltyExemptList 192.0.2.0/24,198.51.100.0/24
+Match User ${user}
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey keyboard-interactive
+    # Remote-SSH tunnels its server over the session. Both are sshd
+    # defaults, restated for ${user} in case the baseline turns them off.
+    AllowTcpForwarding yes
+    AllowStreamLocalForwarding yes
+
+# Back to global scope. Anything appended below this line applies to
+# every user, not to ${user}. Keep it last.
+Match all
 EOF
 }
 

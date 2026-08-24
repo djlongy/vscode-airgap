@@ -14,7 +14,7 @@ They are not live until you copy them:
 |---|---|---|
 | `ssh-config.example` | operator laptop | Unix/macOS: `~/.ssh/config` · Windows: `C:\Users\youruser\.ssh\config` |
 | `settings.json.example` | operator laptop | Windows: `%APPDATA%\Code\User\settings.json` · macOS: `~/Library/Application Support/Code/User/settings.json` · Linux: `~/.config/Code/User/settings.json` |
-| `remote-host.example` | air-gapped host (root) | `/etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf` |
+| `50-vscode-<user>.conf` (one per `--user`; `contrib/remote-host.example` is the browsable copy) | air-gapped host (root) | `/etc/ssh/sshd_config.d/50-vscode-<user>.conf` |
 | `fapolicyd-vscode.rules` | air-gapped host (root) | `/etc/fapolicyd/rules.d/25-vscode-server.rules` (or `$SELF --install-fapolicyd`) |
 
 `settings.json.example` is **JSONC**: comments are `//` lines. Do **not**
@@ -159,20 +159,42 @@ miss fails fast.
 Write the file as UTF-8 **without a BOM**. A UTF-8 BOM makes VS Code
 reject the JSON.
 
-## 5. Remote host (sshd only)
+## 5. Remote host (sshd only) — one drop-in per user
 
 See [`contrib/remote-host.example`](../../contrib/remote-host.example).
-Copy it to `/etc/ssh/sshd_config.d/50-remote-ssh-airgap.conf`, then
-`sshd -t && systemctl reload sshd`. None of the `remote.SSH.*` keys go
-here.
+`--emit-ssh-config --user NAME` writes `50-vscode-NAME.conf`; copy it to
+`/etc/ssh/sshd_config.d/`, then `sshd -t && systemctl reload sshd`. None
+of the `remote.SSH.*` keys go here.
 
-That drop-in turns on **pubkey** (so extra channels do not re-prompt
-for OTP), password + keyboard-interactive (OTP fallback), and the
-TCP/stream forwards Remote-SSH needs. Do **not** set
-`AuthenticationMethods` to keyboard-interactive only — that is what
-forces the token prompt on every channel. `PerSourcePenaltyExemptList`
-stops OpenSSH 9.9+ banning the laptop IP after a hung OTP prompt —
-replace the placeholders with the workstation CIDRs.
+Everything in that file is inside `Match User NAME`, so it turns on
+**pubkey** (extra channels stop re-prompting for OTP) and the
+TCP/stream forwards Remote-SSH needs **for that account only**. The
+host's hardened baseline — pubkey off, OTP through PAM — still applies
+to every other user, and a colleague gets their own
+`50-vscode-<name>.conf` rather than an edit to this one.
+
+`AuthenticationMethods publickey keyboard-interactive` reads as "either
+one is enough". Do **not** write it comma-separated
+(`publickey,keyboard-interactive`): that demands both and forces the
+token prompt on every channel. If the site's baseline needs more than
+keyboard-interactive on its own, restate it as the second alternative.
+
+Verify with the resolved config rather than by reading files:
+
+```bash
+sshd -T -C user=NAME          | grep -E 'pubkeyauth|authenticationmethods'
+sshd -T -C user=SOMEONE-ELSE  | grep -E 'pubkeyauth|authenticationmethods'
+```
+
+The second must still show the baseline. On EL8 add
+`Include /etc/ssh/sshd_config.d/*.conf` at the top of
+`/etc/ssh/sshd_config` first — the stock file has no `Include` line, so
+the directory is ignored entirely (checked on OpenSSH 8.0p1).
+
+`PerSourcePenaltyExemptList` (OpenSSH 9.9+ banning the laptop IP after a
+hung OTP prompt) is global-only and cannot be scoped to a user, so it is
+not in the emitted file. An admin adds it to the host's own hardening
+file if operators get locked out.
 
 First Factor = password. Second Factor = TOTP (not the password again).
 After a pubkey is authorized, subsequent channels authenticate with

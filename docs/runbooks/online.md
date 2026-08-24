@@ -111,13 +111,15 @@ additive.
 ## 7. Print the SSH/VS Code config templates
 
 ```bash
-./bin/vscode-airgap.sh --emit-ssh-config
+./bin/vscode-airgap.sh --emit-ssh-config --user youruser
 ```
 
 Standalone — no `--mode` or network needed. Writes
 `ssh-config.example`, JSONC `settings.json.example` (`//` comments, not
-fake `"// key"` pairs), and `remote-host.example`. See
-`docs/runbooks/remote-ssh-realm-otp.md`.
+fake `"// key"` pairs), the fapolicyd rule, and one sshd drop-in per
+`--user` (`50-vscode-<user>.conf`, scoped to `Match User <user>` so the
+host's global hardening is untouched — defaults to whoever runs it).
+See `docs/runbooks/remote-ssh-realm-otp.md`.
 
 ## 8. Check what's installed
 

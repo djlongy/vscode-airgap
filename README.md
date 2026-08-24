@@ -19,13 +19,16 @@ secondary, opt-in paths.
 # client installers into ~/.vscode-server
 ./bin/vscode-airgap.sh --mode online
 
-# Shared install (as root) on the air-gapped host
+# Shared install (as root) on the air-gapped host. Everything created in
+# youruser's home is chowned to youruser — see "Ownership under sudo".
 sudo ./bin/vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz \
   --install-dir /opt/vscode-server --link-home --user youruser \
   --install-fapolicyd
 
-# Print ssh_config + JSONC settings.json + sshd drop-in + fapolicyd rule
-./bin/vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server
+# Print ssh_config + JSONC settings.json + fapolicyd rule + one
+# Match-scoped sshd drop-in per user (global hardening untouched)
+./bin/vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
+  --user alice --user bob
 
 # Match an already-running remote instead of always grabbing latest:
 ./bin/vscode-airgap.sh --list-versions | head -20
@@ -55,6 +58,24 @@ definition can't reach. This tool is honest about that split, and (as of
 
 Full reasoning: [`docs/designs/vscode-airgap-tunnels.md`](docs/designs/vscode-airgap-tunnels.md).
 
+## Ownership under sudo
+
+Root is the normal way to run the shared install, and Remote-SSH then
+connects as an ordinary user who has to write `data/`, logs and a
+per-commit `.token` under `~/.vscode-server`. Everything this script
+creates inside a user's home is therefore chowned back to that user:
+`--link-home --user NAME` hands `~NAME/.vscode-server`, `bin/`, `cli/`,
+`cli/servers/` and every symlink it makes to NAME — and repairs those
+directories when an earlier root run left them root-owned. An install
+whose `INSTALL_DIR` sits inside a home hands over the paths root
+actually owns there. Paths the user already owns are never touched.
+
+`/opt/vscode-server` and root's own `/root/.vscode-server` stay
+root-owned, which is what `--shared` and the fapolicyd allow-list want.
+`sudo` resets `HOME` to `/root` on most distributions, so a bare `sudo
+vscode-airgap.sh --mode offline …` installs into `/root/.vscode-server`
+— pass `--install-dir` explicitly, or install as the connecting user.
+
 ## Requirements
 
 - `bash`, `curl` (online/bundle only), `tar`, `sha256sum`/`shasum`.
@@ -70,6 +91,137 @@ Full reasoning: [`docs/designs/vscode-airgap-tunnels.md`](docs/designs/vscode-ai
 - Client installers bundled by default: Linux x64 (portable tarball) and
   Windows x64 (User Setup, per-user — no admin rights needed), both
   commit-matched to the staged server.
+
+## Connecting from Windows
+
+The client side is plain Win32-OpenSSH plus the Remote-SSH extension.
+Nothing Windows-specific runs on the air-gapped host.
+
+**1. ssh config — `%USERPROFILE%\.ssh\config`**
+(`C:\Users\youruser\.ssh\config`). Take the *Windows* Host block from
+[`contrib/ssh-config.example`](contrib/ssh-config.example) and keep only
+that one: both blocks in the file share an alias, and OpenSSH uses the
+first value it reads for each keyword.
+
+```
+Host airgapped-host
+    HostName airgapped-host.example.realm
+    User youruser
+    Port 22
+    PreferredAuthentications publickey,keyboard-interactive
+    PubkeyAuthentication yes
+    # IdentityFile ~/.ssh/id_ed25519
+    GSSAPIAuthentication no
+    NumberOfPasswordPrompts 3
+```
+
+`publickey` **first** is the point of the whole block. Remote-SSH opens
+more than one SSH channel, and a realm TOTP is anti-replay inside its
+30-second window, so every channel after the first is denied unless a
+key can authenticate it. `keyboard-interactive` stays behind it for the
+first login. Win32-OpenSSH expands `~` to `%USERPROFILE%`; the absolute
+`C:\Users\youruser\.ssh\id_ed25519` works as well.
+
+**2. Get the key onto the host** (PowerShell, once):
+
+```powershell
+ssh-keygen -t ed25519            # writes %USERPROFILE%\.ssh\id_ed25519
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub |
+  ssh youruser@airgapped-host "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+On an SELinux host follow that with `restorecon -Rv ~/.ssh`, or sshd
+ignores the file. If the realm has its own SSH pubkey store, publish the
+key there and skip `authorized_keys` entirely.
+
+**3. `ssh-agent` is a Windows service**, disabled by default. Only
+needed for a passphrase-protected key:
+
+```powershell
+Set-Service ssh-agent -StartupType Automatic   # needs admin
+Start-Service ssh-agent
+ssh-add $env:USERPROFILE\.ssh\id_ed25519
+```
+
+**4. VS Code settings** — `%APPDATA%\Code\User\settings.json`, merged
+from [`contrib/settings.json.example`](contrib/settings.json.example).
+`remote.SSH.path` pins the native `ssh.exe` rather than a third-party
+one on `PATH`; `remote.SSH.useLocalServer: true` together with
+`remote.SSH.remoteServerListenOnSocket: false` is the channel reuse
+(Win32-OpenSSH ignores `ControlMaster`); `remote.SSH.remotePlatform`
+must name the same Host alias as the ssh config. Set
+`remote.SSH.configFile` only when the config is somewhere other than
+the default path, and point it at a file defining that same alias.
+
+**5. Host side** — an admin installs *your* sshd drop-in, which turns
+pubkey on for your account only:
+
+```bash
+./bin/vscode-airgap.sh --emit-ssh-config --user youruser
+sudo cp 50-vscode-youruser.conf /etc/ssh/sshd_config.d/
+sudo sshd -t && sudo systemctl reload sshd
+sudo sshd -T -C user=youruser | grep -E 'pubkeyauth|authenticationmethods'
+```
+
+Nobody else's login changes. See "Multiple users on one host" below.
+
+## Multiple users on one host
+
+Two colleagues on the same air-gapped box, onboarded weeks apart, must
+not disturb each other or anyone who never touches VS Code. Every piece
+of this is additive per user.
+
+**sshd is per-user, never global.** `--emit-ssh-config --user NAME`
+writes `50-vscode-NAME.conf`
+([`contrib/remote-host.example`](contrib/remote-host.example) is the
+browsable copy) and every directive in it sits inside `Match User NAME`.
+The host's hardened baseline — pubkey off globally, OTP through PAM —
+still governs every other account, which is exactly what a CIS or
+FreeIPA build wants. A colleague gets a second file; the first is never
+edited. Re-running for the same user rewrites only that user's file.
+
+Proof is `sshd -T`, which resolves the whole config for one user:
+
+```bash
+sudo sshd -T -C user=alice | grep -E 'pubkeyauth|authenticationmethods'
+# pubkeyauthentication yes
+# authenticationmethods publickey keyboard-interactive
+sudo sshd -T -C user=someone-else | grep -E 'pubkeyauth|authenticationmethods'
+# pubkeyauthentication no
+# authenticationmethods keyboard-interactive      <- baseline, untouched
+```
+
+`AuthenticationMethods` entries separated by **spaces** are alternatives;
+separated by **commas** they are all required. `publickey
+keyboard-interactive` means a key alone is enough while the OTP path
+still works for the first login. `publickey,keyboard-interactive` would
+demand both and put the OTP prompt back on every channel, which is the
+failure this exists to prevent. If the baseline demands more than
+keyboard-interactive on its own, restate it as the second alternative.
+
+Two things about `sshd_config.d` worth knowing before you trust it,
+checked against OpenSSH 8.0p1 (EL8), 9.9p1 (EL9) and 10.0p2 (Debian 13):
+a `Match` block in one drop-in does **not** scope the next file or the
+rest of the parent config, so these files are independent; but within a
+single file everything after `Match User NAME` belongs to that user,
+which is why the emitted file ends with `Match all` — append below it
+and you are global again. **EL8 ships no `Include` line at all**, so
+`/etc/ssh/sshd_config.d/` is ignored there until an admin adds
+`Include /etc/ssh/sshd_config.d/*.conf` at the *top* of
+`/etc/ssh/sshd_config`. The `sshd -T` check above is how you find out.
+
+**fapolicyd is one shared rule**, not one per user: the allow-list
+covers `INSTALL_DIR`, so `--install-fapolicyd` re-run by the second
+admin rewrites the same file and only reloads fapolicyd when the content
+actually changed.
+
+**`--link-home` is already per user** and, with the ownership fix above,
+each run only creates and chowns paths under that user's own
+`~/.vscode-server`. Running it for a colleague leaves the first user's
+symlinks and ownership exactly as they were.
+
+**The server tree is shared.** One `/opt/vscode-server`, world-readable,
+executed by everyone, allow-listed once. Nothing user-specific in it.
 
 ## Docs
 
@@ -95,7 +247,8 @@ Full reasoning: [`docs/designs/vscode-airgap-tunnels.md`](docs/designs/vscode-ai
   — why Remote-SSH is primary (v2) and `serve-web` isn't (was primary in
   v1 — operator feedback corrected that), alternatives considered.
 - [`contrib/`](contrib/) — the exact `ssh-config.example`,
-  `settings.json.example` (JSONC), and `remote-host.example`
+  `settings.json.example` (JSONC), and per-user sshd drop-in
+  (`remote-host.example`, emitted as `50-vscode-<user>.conf`)
   `--emit-ssh-config` writes, kept in the repo for browsing without
   running the script.
 

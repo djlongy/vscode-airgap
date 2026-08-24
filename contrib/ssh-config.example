@@ -1,13 +1,19 @@
 # WHERE THIS GOES — operator laptop, NOT the remote host
 #   Unix/macOS:  ~/.ssh/config
-#   Windows:     C:\Users\youruser\.ssh\config
-# Merge ONE Host block. Replace the host / realm / user placeholders.
+#   Windows:     %USERPROFILE%\.ssh\config  (C:\Users\youruser\.ssh\config)
+# Merge ONE Host block. Both below use the same alias and OpenSSH takes
+# the FIRST value it reads for each keyword, so keeping both leaves the
+# second one dead. Replace the host / realm / user placeholders.
 # Unix after merge: mkdir -p ~/.ssh/sockets
 #
 # publickey is first so Remote-SSH extra channels skip the OTP prompt
 # once the key is in authorized_keys (or the realm SSH pubkey store).
 # keyboard-interactive stays as the fallback for first-time / OTP login.
 # Uncomment IdentityFile and point it at the matching private key.
+# Windows: ssh-agent is a Windows service, off by default. As admin,
+#   Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent
+#   ssh-add $env:USERPROFILE\.ssh\id_ed25519
+# An unencrypted key needs no agent — IdentityFile alone is enough.
 
 # Unix / macOS — ControlMaster reuses a session; pubkey skips OTP.
 Host airgapped-host
@@ -33,7 +39,9 @@ Host airgapped-host
     Port 22
     PreferredAuthentications publickey,keyboard-interactive
     PubkeyAuthentication yes
-    # IdentityFile C:\Users\youruser\.ssh\id_ed25519
+    # Win32-OpenSSH expands ~ to %USERPROFILE%; the absolute form
+    # C:\Users\youruser\.ssh\id_ed25519 works too.
+    # IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly no
     GSSAPIAuthentication no
     NumberOfPasswordPrompts 3

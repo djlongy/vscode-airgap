@@ -36,6 +36,11 @@
   // Windows only — native OpenSSH optional feature.
   "remote.SSH.path": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
 
+  // Only if your ssh config is NOT at the default path (~/.ssh/config,
+  // on Windows %USERPROFILE%\.ssh\config). It must contain the same
+  // Host alias as remote.SSH.remotePlatform below.
+  // "remote.SSH.configFile": "C:\\Users\\youruser\\.ssh\\config",
+
   // Host alias must match the ssh config Host name.
   "remote.SSH.remotePlatform": {
     "airgapped-host": "linux"
