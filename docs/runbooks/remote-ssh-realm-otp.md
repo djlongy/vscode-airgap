@@ -251,12 +251,23 @@ sudo sshd -t && sudo systemctl reload sshd
 That writes `/etc/ssh/authorized_keys/NAME` (`0644 root:root`, in a
 `0755 root:root` directory) and emits
 `AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys`
-inside the user's `Match` block — central first because each attempt on
-an unreadable NFS path costs three denied lines and three AVCs, and a
-hung hard mount listed first would stall auth; the home path second so
-the file stays correct on local-home hosts. Verify with
-`sshd -T -C user=NAME | grep -i authorizedkeysfile`, and with a control
-user who must still show only `.ssh/authorized_keys`.
+inside the user's `Match` block. Central first, and the home path second
+so the file stays correct on local-home hosts.
+
+Ordering reduces the log noise, it does not end it. Measured per
+successful login on an enforcing host: home path first 3 `Could not
+open` lines + 3 AVCs, central first 1 + 1 (sshd consults the second path
+once even after the first matched), central only 0 + 0. If one line per
+login is unacceptable — a host shipping `secure`/audit to a SIEM — use
+`--central-keys-only`, which emits
+`AuthorizedKeysFile /etc/ssh/authorized_keys/%u` alone and is silent, at
+the cost of a drop-in that only suits unreadable homes (a local-home
+user would have `~/.ssh/authorized_keys` ignored). A hung hard mount
+listed first would also stall auth, which is why the home path is never
+first either way.
+
+Verify with `sshd -T -C user=NAME | grep -i authorizedkeysfile`, and with
+a control user who must still show only `.ssh/authorized_keys`.
 
 ## 6. Why port 22 is enough
 

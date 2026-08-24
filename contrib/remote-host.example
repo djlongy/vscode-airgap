@@ -44,7 +44,14 @@
 # "publickey password,keyboard-interactive". Drop the second alternative
 # once the key works if the site wants youruser on pubkey only.
 #
-
+# THE KEY ITSELF is not configured here: either
+# ~youruser/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
+# restorecon -Rv ~/.ssh on SELinux) or the realm store itself, when sshd
+# resolves keys through AuthorizedKeysCommand (FreeIPA:
+# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
+# arrangement is disturbed. On a host whose homes are on NFS with
+# SELinux enforcing, sshd cannot read the home copy at all — see
+# --central-keys and --install-authorized-key.
 #
 # NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
 # client IP after a hung OTP prompt) is global-only. If operators get

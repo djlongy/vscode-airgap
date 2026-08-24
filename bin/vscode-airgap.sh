@@ -55,6 +55,7 @@ INSTALL_FAPOLICYD="${INSTALL_FAPOLICYD:-0}"
 FAPOLICYD_PRIORITY="${FAPOLICYD_PRIORITY:-$DEFAULT_FAPOLICYD_PRIORITY}"
 SSHD_PRIORITY="${SSHD_PRIORITY:-$DEFAULT_SSHD_PRIORITY}"
 CENTRAL_KEYS="${CENTRAL_KEYS:-0}"        # opt-in: emit AuthorizedKeysFile with a central path first
+CENTRAL_KEYS_ONLY="${CENTRAL_KEYS_ONLY:-0}"  # central path and nothing else — silent logs on a known-NFS host
 CENTRAL_KEYS_DIR="${CENTRAL_KEYS_DIR:-$DEFAULT_CENTRAL_KEYS_DIR}"
 AUTHORIZED_KEY_SRC=""                    # --install-authorized-key's key file; empty means stdin
 WITH_SERVE_WEB=0          # --serve-web: also fetch+optionally start code serve-web
@@ -303,12 +304,23 @@ OPTIONS (env var equivalents in parentheses)
                           .ssh/authorized_keys second. DIR defaults to
                           /etc/ssh/authorized_keys. For hosts where sshd
                           cannot read the home copy at all — NFS homes
-                          under SELinux. Off by default: without this
-                          flag no AuthorizedKeysFile line is emitted and
-                          the host's own key lookup (including FreeIPA's
-                          AuthorizedKeysCommand) is left alone. See
-                          PUBKEY ON NFS HOME DIRECTORIES.
-                          (CENTRAL_KEYS=1, CENTRAL_KEYS_DIR)
+                          under SELinux. Costs 1 denied line + 1 AVC per
+                          successful login (measured; 3 of each if the
+                          home path were first). Off by default: without
+                          this flag no AuthorizedKeysFile line is
+                          emitted and the host's own key lookup
+                          (including FreeIPA AuthorizedKeysCommand) is
+                          left alone. See PUBKEY FAILS BUT PASSWORD/OTP
+                          WORKS. (CENTRAL_KEYS=1, CENTRAL_KEYS_DIR)
+  --central-keys-only [DIR]
+                          Same, but emit ONLY DIR/%u — no home path, so
+                          zero denied lines and zero AVCs per login.
+                          The drop-in is then specific to a host whose
+                          homes are unreadable: a user whose home is
+                          local would have ~/.ssh/authorized_keys
+                          ignored. Use it where /var/log/secure or the
+                          audit log ships to a SIEM and one line per
+                          login matters. (CENTRAL_KEYS_ONLY=1)
   --install-authorized-key [FILE]
                           As root: install a public key at
                           <central-keys>/NAME, 0644 root:root, in a
@@ -474,6 +486,13 @@ PUBKEY FAILS BUT PASSWORD/OTP WORKS (SELinux, NFS homes, StrictModes)
            The key lives at /etc/ssh/authorized_keys/NAME on local disk
            (etc_t, which sshd_t may always read) and the drop-in points
            sshd there FIRST, .ssh/authorized_keys still second.
+           It does NOT silence the log. Measured per successful login on
+           an enforcing host: home path first 3 denied lines + 3 AVCs,
+           central first 1 + 1 (sshd consults the second path once even
+           after the first matched), central only 0 + 0. Reach for
+           --central-keys-only when that last line per login matters —
+           a SIEM-shipping host — and accept that the drop-in is then
+           specific to unreadable homes.
        (b) setsebool -P use_nfs_home_dirs on — host-wide, needs policy
            authority on the box, and configuration management may revert
            it. This tool never sets a boolean; that is the host owner's
@@ -567,7 +586,21 @@ LIMITATIONS — READ THIS BEFORE CHOOSING --tunnel OR --serve-web
   instead — --install-fapolicyd does it and warns what it costs. An
   un-allow-listed HOME install fails with "Operation not permitted" or
   exec format error (126); /tmp stays unusable either way because of
-  noexec. Also set
+  noexec.
+
+  THAT ALSO APPLIES TO THIS SCRIPT. On a fapolicyd-enforcing host,
+    sudo /tmp/vscode-airgap.sh --mode offline ...
+  fails with a bare "Permission denied" and nothing else — fapolicyd
+  denied the execve because the file is not in the trust database, and
+  /tmp is usually noexec besides. It is not a sudo problem, and the
+  message does not say fapolicyd anywhere. Either hand the script to an
+  interpreter that IS trusted, so the script is only ever read as data:
+    sudo bash /tmp/vscode-airgap.sh --mode offline ...
+  or put it somewhere trusted first (/usr/local/bin, /opt) and run it
+  normally. Same for the bundle: it is data, tar reads it, so its
+  location does not matter.
+
+  Also set
   remote.SSH.remoteServerListenOnSocket: false in settings.json —
   true silently forces useLocalServer off (Windows ignores the UI
   toggle). See docs/runbooks/remote-ssh-realm-otp.md.
@@ -575,29 +608,36 @@ EOF
 }
 
 # ── Arg parsing ──────────────────────────────────────────────────────────
+# need_value "$@" — called by every arm that consumes "$2", so a flag given
+# without its value fails with one clear line instead of `set -u` dumping
+# "$2: unbound variable" and a trace at whoever ran it.
+need_value() {
+  { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "$1 needs a value (see --help)"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mode) MODE="$2"; shift 2 ;;
-    --channel) CHANNEL="$2"; shift 2 ;;
-    --version) VERSION="$2"; shift 2 ;;
-    --commit) COMMIT="$2"; shift 2 ;;
-    --arch) ARCH="$2"; shift 2 ;;
-    --install-dir) INSTALL_DIR="$2"; shift 2 ;;
-    --bundle-path) BUNDLE_PATH="$2"; shift 2 ;;
-    --bind) BIND_ADDR="$2"; shift 2 ;;
-    --port) PORT="$2"; shift 2 ;;
-    --token) TOKEN="$2"; shift 2 ;;
-    --extensions) EXTENSIONS="$2"; shift 2 ;;
-    --extensions-file) EXTENSIONS_FILE="$2"; shift 2 ;;
+    --mode) need_value "$@"; MODE="$2"; shift 2 ;;
+    --channel) need_value "$@"; CHANNEL="$2"; shift 2 ;;
+    --version) need_value "$@"; VERSION="$2"; shift 2 ;;
+    --commit) need_value "$@"; COMMIT="$2"; shift 2 ;;
+    --arch) need_value "$@"; ARCH="$2"; shift 2 ;;
+    --install-dir) need_value "$@"; INSTALL_DIR="$2"; shift 2 ;;
+    --bundle-path) need_value "$@"; BUNDLE_PATH="$2"; shift 2 ;;
+    --bind) need_value "$@"; BIND_ADDR="$2"; shift 2 ;;
+    --port) need_value "$@"; PORT="$2"; shift 2 ;;
+    --token) need_value "$@"; TOKEN="$2"; shift 2 ;;
+    --extensions) need_value "$@"; EXTENSIONS="$2"; shift 2 ;;
+    --extensions-file) need_value "$@"; EXTENSIONS_FILE="$2"; shift 2 ;;
     --serve-web) WITH_SERVE_WEB=1; WITH_CLI=1; START_AFTER_INSTALL=1; shift ;;
     --download-only) DOWNLOAD_ONLY=1; START_AFTER_INSTALL=0; shift ;;
     --tunnel) ACTION="tunnel"; WITH_CLI=1; shift ;;
     --status) ACTION="status"; shift ;;
     --emit-ssh-config) ACTION="emit-ssh-config"; shift ;;
     --list-versions) ACTION="list-versions"; shift ;;
-    --limit) LIST_LIMIT="$2"; shift 2 ;;
+    --limit) need_value "$@"; LIST_LIMIT="$2"; shift 2 ;;
     --all) LIST_LIMIT=0; shift ;;
-    --format) LIST_FORMAT="$2"; shift 2 ;;
+    --format) need_value "$@"; LIST_FORMAT="$2"; shift 2 ;;
     --shared) SHARED=1; shift ;;
     --link-home)
       LINK_HOME=1
@@ -608,20 +648,31 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --user)
+      need_value "$@"
       LINK_HOME=1
       LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
       shift 2
       ;;
     --link-users)
+      need_value "$@"
       LINK_HOME=1
       LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
       shift 2
       ;;
     --install-fapolicyd) INSTALL_FAPOLICYD=1; shift ;;
-    --fapolicyd-priority) FAPOLICYD_PRIORITY="$2"; shift 2 ;;
-    --sshd-priority) SSHD_PRIORITY="$2"; shift 2 ;;
+    --fapolicyd-priority) need_value "$@"; FAPOLICYD_PRIORITY="$2"; shift 2 ;;
+    --sshd-priority) need_value "$@"; SSHD_PRIORITY="$2"; shift 2 ;;
     --central-keys)
       CENTRAL_KEYS=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        CENTRAL_KEYS_DIR="$2"
+        shift
+      fi
+      shift
+      ;;
+    --central-keys-only)
+      CENTRAL_KEYS=1
+      CENTRAL_KEYS_ONLY=1
       if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
         CENTRAL_KEYS_DIR="$2"
         shift
@@ -2654,20 +2705,47 @@ sshd_dropin_name() { printf '%s-vscode-%s.conf' "$SSHD_PRIORITY" "$1"; }
 # Per-user sshd override. Nothing global: the host's hardened baseline
 # (typically OTP through PAM, pubkey off) has to survive intact for every
 # account that is not named here.
+# Keep apostrophes OUT of the heredoc bodies below. bash mis-parses a
+# lone `'` inside `$(cat <<EOF ... EOF)` — it keeps scanning for a closing
+# quote and dies with "unexpected EOF" hundreds of lines later. Two
+# apostrophes cancel out, which is why this only shows up when someone
+# adds one.
 write_sshd_user_dropin() {
   local user="$1" file keys_note keys_line=""
   file="$(sshd_dropin_name "$user")"
   if [ "$CENTRAL_KEYS" = "1" ]; then
-    local keys_dir
+    local keys_dir paths_note
     keys_dir="$(_norm_path "$CENTRAL_KEYS_DIR")"
     # Leading newline: this is interpolated at the end of the
     # AuthenticationMethods line so an unset value leaves no blank line.
-    keys_line=$'\n'"    AuthorizedKeysFile ${keys_dir}/%u .ssh/authorized_keys"
-    keys_note="$(cat <<EOF
+    if [ "$CENTRAL_KEYS_ONLY" = "1" ]; then
+      keys_line=$'\n'"    AuthorizedKeysFile ${keys_dir}/%u"
+      paths_note="$(cat <<EOF
+# CENTRAL KEY DIRECTORY, AND ONLY THAT. The AuthorizedKeysFile below
+# names one path:
+#   ${keys_dir}/%u   — root-owned, on local disk, label etc_t
+# The home copy is deliberately NOT listed, which is what takes the log
+# noise to zero (see the measured counts below). The cost is that this
+# file is specific to a host whose homes are unreadable: where homes are
+# LOCAL, ~${user}/.ssh/authorized_keys would stop being consulted at all.
+# Use --central-keys (without -only) for a file that is correct on both.
+EOF
+)"
+    else
+      keys_line=$'\n'"    AuthorizedKeysFile ${keys_dir}/%u .ssh/authorized_keys"
+      paths_note="$(cat <<EOF
 # CENTRAL KEY DIRECTORY. The AuthorizedKeysFile below names two paths and
 # sshd reads them in order:
 #   1. ${keys_dir}/%u   — root-owned, on local disk, label etc_t
-#   2. .ssh/authorized_keys — the user's own copy, in their home
+#   2. .ssh/authorized_keys — the copy in the home directory
+# WHY THE HOME PATH STAYS SECOND: the same file keeps working unchanged
+# on a host whose homes are local, so there is nothing to undo if this
+# user moves or the mount changes. It is not free — see the counts below.
+EOF
+)"
+    fi
+    keys_note="$(cat <<EOF
+${paths_note}
 # WHY THIS EXISTS: with SELinux enforcing and the use_nfs_home_dirs
 # boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
 # home (the file is labelled nfs_t). Pubkey login fails with "Could not
@@ -2677,12 +2755,19 @@ write_sshd_user_dropin() {
 # supported", and relabelling the file on the server changes nothing
 # either because the client assigns nfs_t through genfscon. So the key
 # has to live on a path sshd can always read.
-# WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
-# first writes three denied lines to /var/log/secure and three AVCs, and
-# a hung hard NFS mount named first would stall authentication itself.
-# WHY THE HOME PATH STAYS SECOND: the same file then keeps working
-# unchanged on hosts whose homes are local, so there is nothing to undo
-# if this user moves or the mount changes.
+# WHAT THE ORDER COSTS, measured on an enforcing host, per SUCCESSFUL
+# login (3-login runs, both orders):
+#   home path first          3 "Could not open" lines + 3 AVCs
+#   central first, home 2nd  1 line + 1 AVC — sshd still consults the
+#                            second path once even after the first
+#                            matched (mechanism unconfirmed; the count
+#                            is not)
+#   central only             0 lines, 0 AVCs
+# So central-first is a 3x reduction, not silence. If this host ships
+# /var/log/secure or audit to a SIEM and one line per login matters,
+# use --central-keys-only and accept that the file is then NFS-specific.
+# A hung hard NFS mount named first would also stall authentication
+# itself, which is the other reason the home path is never first.
 # WHAT sshd REQUIRES of the file (StrictModes): owned by root or by
 # ${user}, and not group- or world-writable. 0644 root:root is what
 # --install-authorized-key writes; the directory is 0755 root:root.
@@ -2694,7 +2779,7 @@ EOF
     keys_note="$(cat <<EOF
 # THE KEY ITSELF is not configured here: either
 # ~${user}/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
-# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
+# restorecon -Rv ~/.ssh on SELinux) or the realm store itself, when sshd
 # resolves keys through AuthorizedKeysCommand (FreeIPA:
 # sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
 # arrangement is disturbed. On a host whose homes are on NFS with

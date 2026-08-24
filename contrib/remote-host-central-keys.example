@@ -47,7 +47,10 @@
 # CENTRAL KEY DIRECTORY. The AuthorizedKeysFile below names two paths and
 # sshd reads them in order:
 #   1. /etc/ssh/authorized_keys/%u   — root-owned, on local disk, label etc_t
-#   2. .ssh/authorized_keys — the user's own copy, in their home
+#   2. .ssh/authorized_keys — the copy in the home directory
+# WHY THE HOME PATH STAYS SECOND: the same file keeps working unchanged
+# on a host whose homes are local, so there is nothing to undo if this
+# user moves or the mount changes. It is not free — see the counts below.
 # WHY THIS EXISTS: with SELinux enforcing and the use_nfs_home_dirs
 # boolean off, sshd_t cannot read an authorized_keys that lives on an NFS
 # home (the file is labelled nfs_t). Pubkey login fails with "Could not
@@ -57,26 +60,24 @@
 # supported", and relabelling the file on the server changes nothing
 # either because the client assigns nfs_t through genfscon. So the key
 # has to live on a path sshd can always read.
-# WHY CENTRAL IS FIRST: every login that consults an unreadable NFS path
-# first writes three denied lines to /var/log/secure and three AVCs, and
-# a hung hard NFS mount named first would stall authentication itself.
-# WHY THE HOME PATH STAYS SECOND: the same file then keeps working
-# unchanged on hosts whose homes are local, so there is nothing to undo
-# if this user moves or the mount changes.
+# WHAT THE ORDER COSTS, measured on an enforcing host, per SUCCESSFUL
+# login (3-login runs, both orders):
+#   home path first          3 "Could not open" lines + 3 AVCs
+#   central first, home 2nd  1 line + 1 AVC — sshd still consults the
+#                            second path once even after the first
+#                            matched (mechanism unconfirmed; the count
+#                            is not)
+#   central only             0 lines, 0 AVCs
+# So central-first is a 3x reduction, not silence. If this host ships
+# /var/log/secure or audit to a SIEM and one line per login matters,
+# use --central-keys-only and accept that the file is then NFS-specific.
+# A hung hard NFS mount named first would also stall authentication
+# itself, which is the other reason the home path is never first.
 # WHAT sshd REQUIRES of the file (StrictModes): owned by root or by
 # youruser, and not group- or world-writable. 0644 root:root is what
 # --install-authorized-key writes; the directory is 0755 root:root.
 # AuthorizedKeysCommand (FreeIPA: sss_ssh_authorizedkeys) is a separate
 # mechanism and is untouched by this file.
-  else
-    keys_note=# THE KEY ITSELF is not configured here: either
-# ~youruser/.ssh/authorized_keys (0600, ~/.ssh 0700, plus
-# restorecon -Rv ~/.ssh on SELinux) or the realm's own store when sshd
-# resolves keys through AuthorizedKeysCommand (FreeIPA:
-# sss_ssh_authorizedkeys). AuthorizedKeysFile is left alone so neither
-# arrangement is disturbed. On a host whose homes are on NFS with
-# SELinux enforcing, sshd cannot read the home copy at all — see
-# --central-keys and --install-authorized-key.
 #
 # NOT SETTABLE PER USER: PerSourcePenaltyExemptList (OpenSSH 9.9+ bans a
 # client IP after a hung OTP prompt) is global-only. If operators get

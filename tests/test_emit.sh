@@ -86,6 +86,18 @@ grep -q 'nfs_t' "$CK_DROPIN" || fail "central-keys drop-in does not explain why 
 "$SCRIPT" --emit-ssh-config --install-dir "$TMP/central2" --user alice --central-keys /srv/ssh-keys >/dev/null
 grep -qF 'AuthorizedKeysFile /srv/ssh-keys/%u .ssh/authorized_keys' "$TMP/central2/50-vscode-alice.conf" \
   || fail "--central-keys DIR was not honoured"
+# --central-keys-only drops the home path so the log goes quiet
+"$SCRIPT" --emit-ssh-config --install-dir "$TMP/central-only" --user alice --central-keys-only >/dev/null
+ONLY_AKF="$(grep -E '^[[:space:]]*AuthorizedKeysFile' "$TMP/central-only/50-vscode-alice.conf" || true)"
+[ "$(printf '%s\n' "$ONLY_AKF" | awk '{print NF}')" -eq 2 ] \
+  || fail "--central-keys-only should emit exactly one path: $ONLY_AKF"
+[ "$(printf '%s\n' "$ONLY_AKF" | awk '{print $2}')" = "/etc/ssh/authorized_keys/%u" ] \
+  || fail "--central-keys-only named the wrong path: $ONLY_AKF"
+printf '%s\n' "$ONLY_AKF" | grep -q '\.ssh/authorized_keys$' \
+  && fail "--central-keys-only still lists the home path"
+# ...and --central-keys on its own keeps both, which is the default shape
+[ "$(printf '%s\n' "$AKF" | awk '{print NF}')" -eq 3 ] \
+  || fail "--central-keys should emit two paths: $AKF"
 # Default emission must stay exactly as it was: no AuthorizedKeysFile line
 # at all, so a FreeIPA host's AuthorizedKeysCommand is left alone.
 grep -qE '^[[:space:]]*AuthorizedKeysFile' "$DROPIN" \
@@ -176,6 +188,18 @@ grep -qi 'each additional user needs their own' "$HOME_INSTALL/fapolicyd-vscode.
 # a shared path carries the rule without the home-directory note
 grep -q 'THIS RULE COVERS A HOME DIRECTORY' "$OUT/fapolicyd-vscode.rules" \
   && fail "a non-home install dir was described as a home directory"
+
+# ── a value flag given without its value fails cleanly ──────────────────
+# set -u used to turn this into "$2: unbound variable" plus a trace.
+for BARE_FLAG in --version --mode --user --install-dir --sshd-priority; do
+  if "$SCRIPT" "$BARE_FLAG" >/dev/null 2>"$TMP/arity-err"; then
+    fail "$BARE_FLAG with no value should fail"
+  fi
+  grep -q -e "$BARE_FLAG needs a value" "$TMP/arity-err" \
+    || fail "$BARE_FLAG with no value did not explain itself: $(cat "$TMP/arity-err")"
+  grep -qi 'unbound variable' "$TMP/arity-err" \
+    && fail "$BARE_FLAG with no value still dumps a bash trace"
+done
 
 # ── help documents ownership and the multi-user design ──────────────────
 HELP="$("$SCRIPT" --help)"

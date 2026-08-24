@@ -353,12 +353,31 @@ may always read. The drop-in names that path **first** and
 
 Three details that are deliberate:
 
-- **Central first, not second.** Every login that consults an unreadable
-  NFS path writes three denied lines to `/var/log/secure` and three AVCs
-  before falling through, and a hung hard NFS mount named first would
-  stall authentication itself.
+- **Central first, not second** — but this reduces the noise, it does not
+  remove it. Measured on an enforcing host over 3-login runs in both
+  orders, per *successful* login:
+
+  | `AuthorizedKeysFile` | `/var/log/secure` lines | AVCs |
+  |---|---|---|
+  | home path first | 3 | 3 |
+  | central first, home second | 1 | 1 |
+  | central only (`--central-keys-only`) | 0 | 0 |
+
+  sshd still consults the second path once even after the first one
+  matched — the mechanism is unconfirmed, the count is not. So the
+  default two-path form is a 3x reduction and costs one line and one AVC
+  per login. A hung hard NFS mount named first would also stall
+  authentication itself, which is the other reason the home path is
+  never first.
 - **The home path stays second**, so the same file is still correct on a
   host with local homes — nothing to undo if the user or the mount moves.
+  That portability is exactly what the remaining line per login buys. If
+  the host ships `/var/log/secure` or the audit log to a SIEM and one
+  line per login is not acceptable, use **`--central-keys-only`**: it
+  emits `AuthorizedKeysFile /etc/ssh/authorized_keys/%u` alone, which is
+  silent, and in exchange the drop-in only suits a host whose homes are
+  unreadable — a user with a local home would have their
+  `~/.ssh/authorized_keys` ignored entirely.
 - **`StrictModes` decides what sshd will accept**: the key file must be
   owned by root or by that user and must not be group- or world-writable.
   `0644 root:root` is the tight choice. `--install-authorized-key`
@@ -369,6 +388,28 @@ Three details that are deliberate:
 separate mechanism and is untouched. Without `--central-keys` the
 emitted drop-in contains no `AuthorizedKeysFile` line at all, so a host
 that resolves keys through the realm keeps doing exactly that.
+
+## Running the script on a fapolicyd host
+
+```
+$ sudo /tmp/vscode-airgap.sh --mode offline --bundle-path ./bundle.tar.gz
+sudo: /tmp/vscode-airgap.sh: command not found
+# or simply:
+-bash: /tmp/vscode-airgap.sh: Permission denied
+```
+
+That is **not** a sudo problem, and the message never mentions the cause.
+fapolicyd denied the `execve` because the file is not in the trust
+database — and `/tmp` is usually `noexec` as well. Give the script to an
+interpreter that *is* trusted, so the script is only ever read as data:
+
+```bash
+sudo bash /tmp/vscode-airgap.sh --mode offline --bundle-path ./bundle.tar.gz
+```
+
+Or copy it somewhere trusted (`/usr/local/bin`, `/opt`) and run it
+normally. The bundle itself needs no special treatment: `tar` reads it as
+data, so it can live anywhere.
 
 ## When home is all you get
 

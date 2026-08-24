@@ -91,6 +91,15 @@ symlinks whose real path is `/opt`) execute. Offline install writes both layouts
 (classic `bin/<commit>/` and exec-server `code-<commit>` +
 `cli/servers/Stable-<commit>/server/`) plus the handshake tarball.
 
+**Running the script itself on a fapolicyd host.** `sudo
+/tmp/vscode-airgap.sh ...` fails with a bare `Permission denied` and no
+explanation: fapolicyd denied the `execve` because the file is not in the
+trust database, and `/tmp` is usually `noexec` too. It looks like a sudo
+problem and is not. Run it through a trusted interpreter, so the script
+is only read as data — `sudo bash /path/to/vscode-airgap.sh ...` — or
+copy it to a trusted location (`/usr/local/bin`, `/opt`) first. The
+bundle is data either way; `tar` reads it wherever it sits.
+
 The script never calls `curl` in `--mode offline` — there's nothing to
 disable. To *prove* that during testing, run with network genuinely cut:
 
