@@ -60,6 +60,7 @@ CENTRAL_KEYS_DIR="${CENTRAL_KEYS_DIR:-$DEFAULT_CENTRAL_KEYS_DIR}"
 AUTHORIZED_KEY_SRC=""                    # --install-authorized-key's key file; empty means stdin
 WITH_SERVE_WEB=0          # --serve-web: also fetch+optionally start code serve-web
 WITH_CLI=0                # implied by --serve-web or --tunnel
+KEEP_OLD="${KEEP_OLD:-0}"       # --keep-old: do not prune other commits after an install
 LIST_VERSIONS="${LIST_VERSIONS:-0}"
 LIST_FORMAT="text"        # text|json, for --list-versions
 # Default 10 newest rows so --list-versions is a picker, not a 10-year dump.
@@ -109,6 +110,7 @@ USAGE
   vscode-airgap.sh --mode offline  [options]   # air-gapped host: install from a bundle
   vscode-airgap.sh --emit-ssh-config [--install-dir DIR]
   vscode-airgap.sh --status [--install-dir DIR]
+  vscode-airgap.sh --prune [--install-dir DIR]
   vscode-airgap.sh --link-home [--user NAME] [--install-dir DIR]
   vscode-airgap.sh --install-fapolicyd [--install-dir DIR]
   vscode-airgap.sh --install-authorized-key KEY.pub --user NAME [--central-keys DIR]
@@ -250,8 +252,33 @@ OPTIONS (env var equivalents in parentheses)
                           --without-connection-token. See --serve-web.
                           (TOKEN)
   --download-only         Fetch/verify artifacts but do not install/start.
-  --status                Print install state for INSTALL_DIR and exit.
+  --status                Print install state for INSTALL_DIR and exit,
+                          including every commit staged there other than
+                          the installed one and the bytes it occupies.
                           Standalone — no MODE/network/curl required.
+  --prune                 Remove every commit under INSTALL_DIR except
+                          the installed one, printing each path removed
+                          and the bytes freed. The installed one is the
+                          commit whose vscode-cli-<commit>.tar.gz.done
+                          marker exists and whose code-<commit> CLI is
+                          present; with several markers and no CLI, the
+                          newest marker. Pass --commit to name it
+                          explicitly. Refuses outright when no marker
+                          exists — an incomplete install is not a reason
+                          to delete the version that still works.
+                          Standalone — no MODE/network required.
+  --keep-old              Do not prune other commits after an install.
+                          By default an install that completes (its
+                          .done marker written) removes every other
+                          commit's bin/<commit>/, code-<commit>,
+                          cli/servers/Stable-<commit>/ and CLI archive,
+                          because only one of them can ever serve a
+                          connection and the host has no other way to
+                          reclaim the space. extensions/, data/, logs,
+                          the staged client installers and the emitted
+                          templates are version-independent and are
+                          never touched, and neither is anything
+                          outside INSTALL_DIR. (KEEP_OLD=1)
   --emit-ssh-config       Write the templates into INSTALL_DIR and print
                           where each one is copied (laptop ~/.ssh/config,
                           laptop VS Code user settings.json, fapolicyd
@@ -546,6 +573,10 @@ EXAMPLES
   # Optional secondary path: serve-web instead of / alongside Remote-SSH
   ./vscode-airgap.sh --mode online --serve-web
 
+  # See what else is staged, then reclaim the space
+  ./vscode-airgap.sh --status --install-dir /opt/vscode-server
+  sudo ./vscode-airgap.sh --prune --install-dir /opt/vscode-server
+
   # Match an already-running remote server instead of always fetching latest:
   # 1. On the remote, find its exact commit (no network needed):
   #      ./vscode-airgap.sh --status
@@ -633,6 +664,8 @@ while [ $# -gt 0 ]; do
     --download-only) DOWNLOAD_ONLY=1; START_AFTER_INSTALL=0; shift ;;
     --tunnel) ACTION="tunnel"; WITH_CLI=1; shift ;;
     --status) ACTION="status"; shift ;;
+    --prune) ACTION="prune"; shift ;;
+    --keep-old) KEEP_OLD=1; shift ;;
     --emit-ssh-config) ACTION="emit-ssh-config"; shift ;;
     --list-versions) ACTION="list-versions"; shift ;;
     --limit) need_value "$@"; LIST_LIMIT="$2"; shift 2 ;;
@@ -712,7 +745,7 @@ if [ -z "$MODE" ] && [ "$ACTION" = "install" ]; then
 fi
 if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] || [ "$ACTION" = "list-versions" ] \
     || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ] \
-    || [ "$ACTION" = "install-authorized-key" ]; then
+    || [ "$ACTION" = "install-authorized-key" ] || [ "$ACTION" = "prune" ]; then
   STANDALONE_ACTION=1
 else
   STANDALONE_ACTION=0
@@ -725,7 +758,7 @@ fi
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 if [ "$ACTION" = "status" ] || [ "$ACTION" = "emit-ssh-config" ] \
     || [ "$ACTION" = "link-home" ] || [ "$ACTION" = "install-fapolicyd" ] \
-    || [ "$ACTION" = "install-authorized-key" ]; then
+    || [ "$ACTION" = "install-authorized-key" ] || [ "$ACTION" = "prune" ]; then
   : # genuinely zero deps beyond bash/coreutils, by design
 elif [ "$ACTION" = "list-versions" ]; then
   if [ -z "$BUNDLE_PATH" ]; then
@@ -2369,6 +2402,8 @@ install_from_stage() {
         "'Install from VSIX...' for each file in that directory."
   fi
 
+  prune_after_install "$commit"
+
   cp -f "$stage_dir/versions.json" "$INSTALL_DIR/versions.json"
   apply_shared_perms "$INSTALL_DIR"
   reown_root_created "$install_owner" "$INSTALL_DIR"
@@ -2463,6 +2498,164 @@ start_tunnel() {
   exec "$cli_bin" tunnel
 }
 
+# ── Pruning older versions ─────────────────────────────────────────────
+# Only one server commit can serve a connection, and an air-gapped host
+# has no way to garbage-collect the rest — without this, every bundle
+# carried across the gap adds another server tree that nothing will ever
+# run again. Everything below keys on the 40-hex commit id, so
+# version-independent state (data/, extensions/, extensions-to-install/,
+# client-installers/, logs, the emitted templates, versions.json) is
+# never a candidate.
+is_commit_id() {
+  case "${1:-}" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ]
+}
+
+# list_commits — every commit with artefacts under INSTALL_DIR, one per line.
+list_commits() {
+  local c
+  { ls "$INSTALL_DIR" 2>/dev/null | sed -n -e 's/^code-//p' -e 's/^vscode-cli-\(.*\)\.tar\.gz$/\1/p'
+    ls "$INSTALL_DIR/bin" 2>/dev/null
+    ls "$INSTALL_DIR/cli/servers" 2>/dev/null | sed -n 's/^Stable-//p'
+  } | sort -u | while read -r c; do
+    is_commit_id "$c" && printf '%s\n' "$c"
+  done
+}
+
+# commit_paths <commit> — everything install_from_stage lays down for one
+# commit. Keep this in step with install_from_stage if a new per-commit
+# path is ever added there.
+commit_paths() {
+  local c="$1"
+  printf '%s\n' \
+    "$INSTALL_DIR/bin/$c" \
+    "$INSTALL_DIR/code-$c" \
+    "$INSTALL_DIR/cli/servers/Stable-$c" \
+    "$INSTALL_DIR/vscode-cli-$c.tar.gz" \
+    "$INSTALL_DIR/vscode-cli-$c.tar.gz.done"
+}
+
+# current_commit — the commit a Remote-SSH client can actually use: one
+# whose .done marker was written (install_from_stage writes it last),
+# preferring the one whose CLI binary is there too, newest marker breaking
+# a tie. Empty when no install under INSTALL_DIR ever completed.
+current_commit() {
+  local c best="" best_rank=-1 rank ts best_ts=0 manifest=""
+  if [ -n "$COMMIT" ] && [ -f "$INSTALL_DIR/vscode-cli-$COMMIT.tar.gz.done" ]; then
+    printf '%s' "$COMMIT"
+    return 0
+  fi
+  # versions.json records the last install, which settles the case two
+  # markers were written in the same second.
+  if [ -f "$INSTALL_DIR/versions.json" ]; then
+    manifest="$(json_field "$INSTALL_DIR/versions.json" commit)"
+    if is_commit_id "$manifest" && [ -f "$INSTALL_DIR/vscode-cli-$manifest.tar.gz.done" ]; then
+      printf '%s' "$manifest"
+      return 0
+    fi
+  fi
+  for c in $(list_commits); do
+    [ -f "$INSTALL_DIR/vscode-cli-$c.tar.gz.done" ] || continue
+    rank=0
+    [ -e "$INSTALL_DIR/code-$c" ] && rank=1
+    ts="$(file_mtime "$INSTALL_DIR/vscode-cli-$c.tar.gz.done")"
+    if [ "$rank" -gt "$best_rank" ] || { [ "$rank" -eq "$best_rank" ] && [ "$ts" -gt "$best_ts" ]; }; then
+      best="$c"; best_rank="$rank"; best_ts="$ts"
+    fi
+  done
+  printf '%s' "$best"
+}
+
+# bytes_of <path>... — du counts 1K blocks on both GNU and BSD, so this is
+# disk usage rather than apparent size: what a prune actually gives back.
+bytes_of() {
+  local kb
+  kb="$(du -sk "$@" 2>/dev/null | awk '{t+=$1} END{print t+0}')"
+  echo "$(( kb * 1024 ))"
+}
+
+# prunable <path> — true only for a real path whose parent resolves inside
+# INSTALL_DIR. A symlink is never deleted and never followed: on a shared
+# tree it is the one way a commit-shaped path could lead out of the
+# install, and deleting the link would still be deleting something this
+# script did not write.
+prunable() {
+  local p="$1" root parent
+  root="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" || return 1
+  { [ -e "$p" ] || [ -L "$p" ]; } || return 1
+  if [ -L "$p" ]; then
+    warn "not pruning $p — it is a symlink, not an artefact this install wrote"
+    return 1
+  fi
+  parent="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+  case "$parent" in
+    "$root"|"$root"/*) return 0 ;;
+  esac
+  warn "not pruning $p — it resolves outside $root"
+  return 1
+}
+
+# prune_commits <keep-commit> <verbose 0|1>
+prune_commits() {
+  local keep="$1" verbose="${2:-0}"
+  local c p sz hit freed=0 n=0 pruned=""
+  for c in $(list_commits); do
+    [ "$c" = "$keep" ] && continue
+    hit=0
+    while IFS= read -r p; do
+      prunable "$p" || continue
+      sz="$(bytes_of "$p")"
+      rm -rf "$p"
+      freed=$(( freed + sz ))
+      hit=1
+      [ "$verbose" = "1" ] && printf 'removed %s (%s bytes)\n' "$p" "$sz"
+    done < <(commit_paths "$c")
+    if [ "$hit" = "1" ]; then
+      n=$(( n + 1 ))
+      pruned="${pruned:+$pruned }${c:0:12}"
+    fi
+  done
+  # bin/ and cli/servers/ are ours and are meaningless empty; rmdir refuses
+  # to touch them while anything (the kept commit, a user's file) is there.
+  rmdir "$INSTALL_DIR/cli/servers" "$INSTALL_DIR/cli" "$INSTALL_DIR/bin" 2>/dev/null || true
+  if [ "$n" -gt 0 ]; then
+    log "pruned $n older version(s) under $INSTALL_DIR ($pruned), freed $freed bytes"
+    log "  kept ${keep:0:12}... — pass --keep-old to an install to skip this"
+  fi
+  [ "$verbose" = "1" ] && printf 'freed %s bytes across %s version(s)\n' "$freed" "$n"
+  return 0
+}
+
+# Called at the end of an install. One whose .done marker was never
+# written did not complete, so it prunes nothing: the old version is the
+# only working one left.
+prune_after_install() {
+  local commit="$1" others
+  others="$(list_commits | grep -v "^${commit}\$" || true)"
+  [ -n "$others" ] || return 0
+  if [ "$KEEP_OLD" = "1" ]; then
+    log "--keep-old: leaving earlier versions under $INSTALL_DIR in place"
+    return 0
+  fi
+  if [ ! -f "$INSTALL_DIR/vscode-cli-$commit.tar.gz.done" ]; then
+    warn "no .done marker for ${commit:0:12}... — install did not complete, leaving earlier versions alone"
+    return 0
+  fi
+  prune_commits "$commit" 0
+}
+
+run_prune() {
+  [ -d "$INSTALL_DIR" ] || die "nothing installed at $INSTALL_DIR"
+  local keep
+  keep="$(current_commit)"
+  [ -n "$keep" ] || die "no completed install under $INSTALL_DIR (no .done marker) — refusing to prune"
+  echo "install dir : $INSTALL_DIR"
+  echo "keeping     : $keep"
+  prune_commits "$keep" 1
+}
+
 # ── status ─────────────────────────────────────────────────────────────
 run_status() {
   if [ ! -f "$INSTALL_DIR/versions.json" ]; then
@@ -2486,6 +2679,26 @@ run_status() {
   fi
   if [ -n "$commit" ] && [ -s "$INSTALL_DIR/vscode-cli-$commit.tar.gz" ]; then
     echo "handshake   : $INSTALL_DIR/vscode-cli-$commit.tar.gz (present)"
+  fi
+  # Other commits are dead weight on an air-gapped host: nothing can run
+  # them, and nothing else will remove them.
+  local cur extra sz total=0 n=0 paths p
+  cur="$commit"
+  [ -n "$cur" ] || cur="$(current_commit)"
+  for extra in $(list_commits); do
+    [ "$extra" = "$cur" ] && continue
+    paths=()
+    while IFS= read -r p; do
+      { [ -e "$p" ] || [ -L "$p" ]; } && paths+=("$p")
+    done < <(commit_paths "$extra")
+    [ "${#paths[@]}" -gt 0 ] || continue
+    sz="$(bytes_of "${paths[@]}")"
+    total=$(( total + sz ))
+    n=$(( n + 1 ))
+    echo "extra ver   : $extra ($sz bytes, ${#paths[@]} paths)"
+  done
+  if [ "$n" -gt 0 ]; then
+    echo "extra total : $n version(s), $total bytes — remove with: $SELF --prune --install-dir $INSTALL_DIR"
   fi
   # `&&` as the LAST command of a function under `set -e` propagates a
   # false test as the whole script's exit code — found live: a
@@ -2858,6 +3071,10 @@ EOF
 # ── Dispatch ───────────────────────────────────────────────────────────
 if [ "$ACTION" = "status" ]; then
   run_status
+  exit 0
+fi
+if [ "$ACTION" = "prune" ]; then
+  run_prune
   exit 0
 fi
 if [ "$ACTION" = "emit-ssh-config" ]; then
