@@ -435,6 +435,27 @@ later, and the rule count grows with the team. `/opt/vscode-server` is
 preferable where a host allows it — one rule, one admin-controlled tree,
 every user covered — but it is a preference, not a prerequisite.
 
+## Only one version at a time
+
+Each bundle you carry across the gap lays down another server tree, and
+only the commit the client asks for is ever executed. So an install that
+completes removes the versions it replaces: `bin/<commit>/`,
+`code-<commit>`, `cli/servers/Stable-<commit>/` and the CLI archive of
+every other commit under `--install-dir`. Version-independent state
+(`extensions/`, `data/`, logs, the staged client installers, the emitted
+templates) is keyed on nothing and is never touched, nor is any path
+outside the install directory or any symlink. An install that did not
+complete, one whose `vscode-cli-<commit>.tar.gz.done` marker was never
+written, prunes nothing at all: the old version is then the only working
+one on the host. Pass `--keep-old` to skip the prune, `--status` to see
+what else is staged and what it costs, and `--prune` on its own to clear
+it out later:
+
+```bash
+./bin/vscode-airgap.sh --status --install-dir /opt/vscode-server
+sudo ./bin/vscode-airgap.sh --prune --install-dir /opt/vscode-server
+```
+
 ## Docs
 
 - [`docs/runbooks/remote-ssh-realm-otp.md`](docs/runbooks/remote-ssh-realm-otp.md)

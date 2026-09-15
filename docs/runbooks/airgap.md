@@ -119,6 +119,18 @@ VSIX files staged, then the script prints next steps. If the bundle is
 corrupt or was tampered with in transit, the sha256 check fails loudly
 and nothing is installed.
 
+The install also clears out the versions it replaces once its own
+`.done` marker is written, so a host that gets a new bundle every month
+does not end up with a year of server trees nobody can run. Only
+commit-keyed paths go: `bin/<commit>/`, `code-<commit>`,
+`cli/servers/Stable-<commit>/` and the CLI archive, all of them inside
+`--install-dir`. `extensions/`, `data/` and your logs stay. Add
+`--keep-old` to the install if you want the previous version left in
+place for a rollback, then `--status` shows what is still staged and
+`--prune` removes everything but the installed commit when you no longer
+need it. An install that fails before the marker is written never prunes,
+so a bad bundle cannot take the working version with it.
+
 ## 3. Install the matching client on your laptop
 
 ```bash
