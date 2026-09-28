@@ -201,16 +201,14 @@ for BARE_FLAG in --version --mode --user --install-dir --sshd-priority; do
     && fail "$BARE_FLAG with no value still dumps a bash trace"
 done
 
-# ── help documents ownership and the multi-user design ──────────────────
+# ── help states the sudo defaults ───────────────────────────────────────
 HELP="$("$SCRIPT" --help)"
-printf '%s' "$HELP" | grep -q 'OWNERSHIP UNDER sudo' \
-  || fail "--help does not document ownership under sudo"
-printf '%s' "$HELP" | grep -q 'chowned to that user' \
-  || fail "--help does not say --link-home chowns to the target user"
-printf '%s' "$HELP" | grep -q 'MULTI-USER, ONE HOST' \
-  || fail "--help does not document the multi-user design"
-printf '%s' "$HELP" | grep -q 'Match User NAME' \
-  || fail "--help does not say the sshd drop-in is Match-scoped"
+printf '%s' "$HELP" | grep -qF '$SUDO_USER' \
+  || fail "--help does not say --user defaults to the sudo user"
+printf '%s' "$HELP" | grep -qF 'vscode-bundle-v<version>.tar.gz' \
+  || fail "--help does not give the default bundle name"
+printf '%s' "$HELP" | grep -qF -- '--all-users' \
+  || fail "--help does not document --all-users"
 
 # ── --link-home ─────────────────────────────────────────────────────────
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -239,6 +237,24 @@ WRONG_OWNER="$(find "$DEST" ! -uid "$(id -u)" -print 2>/dev/null | head -5)"
 [ -z "$WRONG_OWNER" ] || fail "link-home left paths owned by another uid: $WRONG_OWNER"
 # second run is a no-op
 HOME="$HOME_FAKE" "$SCRIPT" --link-home --install-dir "$SRC" >/dev/null
+
+# A real path where a link belongs is replaced without --force
+rm "$DEST/code-$COMMIT"
+printf 'stale' > "$DEST/code-$COMMIT"
+HOME="$HOME_FAKE" "$SCRIPT" --link-home --install-dir "$SRC" >/dev/null 2>&1 \
+  || fail "link-home refused to replace a real path without --force"
+[ -L "$DEST/code-$COMMIT" ] || fail "link-home left the real path in place"
+
+# A link into INSTALL_DIR whose commit was pruned is removed on relink
+ln -s "$SRC/bin/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$DEST/bin/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+HOME="$HOME_FAKE" "$SCRIPT" --link-home --install-dir "$SRC" >/dev/null 2>&1
+[ -L "$DEST/bin/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ] && fail "stale link to a pruned commit survived"
+[ -L "$DEST/bin/$COMMIT" ] || fail "stale-link cleanup removed the live link"
+
+# --all-users is root-only
+if "$SCRIPT" --all-users --install-dir "$SRC" >/dev/null 2>&1; then
+  [ "$(id -u)" -eq 0 ] || fail "--all-users ran without root"
+fi
 
 # A missing home must not be created (mkdir -p would make it root-owned)
 if HOME="$TMP/no-such-home" "$SCRIPT" --link-home --install-dir "$SRC" >/dev/null 2>&1; then

@@ -19,8 +19,15 @@ SELF="$(basename "$0")"
 readonly SELF
 readonly UPDATE_HOST="https://update.code.visualstudio.com"
 readonly MARKETPLACE_HOST="https://marketplace.visualstudio.com"
-readonly DEFAULT_INSTALL_DIR="${HOME}/.vscode-server"
 readonly DEFAULT_SHARED_INSTALL_DIR="/opt/vscode-server"
+# Under sudo HOME is /root, and nobody connects as root: default to the
+# shared tree there instead.
+if [ "$(id -u)" -eq 0 ]; then
+  DEFAULT_INSTALL_DIR="$DEFAULT_SHARED_INSTALL_DIR"
+else
+  DEFAULT_INSTALL_DIR="${HOME}/.vscode-server"
+fi
+readonly DEFAULT_INSTALL_DIR
 readonly DEFAULT_BIND_ADDR="127.0.0.1"
 readonly DEFAULT_PORT="8000"
 readonly DEFAULT_SERVER_ARCH="linux-x64"
@@ -51,6 +58,7 @@ FORCE=0
 SHARED="${SHARED:-0}"     # world-readable tree; auto-on when INSTALL_DIR is not under $HOME
 LINK_HOME="${LINK_HOME:-0}"
 LINK_USERS="${LINK_USERS:-}"
+ALL_USERS="${ALL_USERS:-0}"     # --all-users: link every account that has a ~/.vscode-server
 INSTALL_FAPOLICYD="${INSTALL_FAPOLICYD:-0}"
 FAPOLICYD_PRIORITY="${FAPOLICYD_PRIORITY:-$DEFAULT_FAPOLICYD_PRIORITY}"
 SSHD_PRIORITY="${SSHD_PRIORITY:-$DEFAULT_SSHD_PRIORITY}"
@@ -87,554 +95,101 @@ cleanup_stage_dir() { [ -n "$_STAGE_DIR" ] && rm -rf "$_STAGE_DIR"; }
 # ── Help ─────────────────────────────────────────────────────────────────
 usage() {
   cat <<'EOF'
-vscode-airgap.sh — stage VS Code Remote-SSH for an air-gapped Linux host
-
-Primary path: pre-install the exact VS Code Server commit on the
-air-gapped host so Remote-SSH finds a matching install and never tries
-to download one over the wire. Stages BOTH layouts the client may pick
-(classic INSTALL_DIR/bin/<commit>/ AND exec-server
-INSTALL_DIR/code-<commit> plus cli/servers/Stable-<commit>/server/)
-plus matching Linux/Windows client installers so Help > About reports
-the same commit. INSTALL_DIR defaults to ~/.vscode-server. For a
-shared install that fapolicyd can allow-list, use
---install-dir /opt/vscode-server (world-readable; then --link-home so
-Remote-SSH's per-user presence tests still pass). Connects over plain
-SSH port 22 with pubkey (skips repeated OTP) and realm/OTP as fallback
-— see docs/runbooks/remote-ssh-realm-otp.md. `code serve-web` and
-Remote Tunnels are supported as secondary, opt-in paths
-(--serve-web / --tunnel).
+vscode-airgap.sh: pre-stage the VS Code Remote-SSH server on an air-gapped Linux host.
 
 USAGE
-  vscode-airgap.sh --mode online   [options]   # internet-connected host
-  vscode-airgap.sh --mode bundle   [options]   # internet-connected host: pack a bundle
-  vscode-airgap.sh --mode offline  [options]   # air-gapped host: install from a bundle
-  vscode-airgap.sh --emit-ssh-config [--install-dir DIR]
-  vscode-airgap.sh --status [--install-dir DIR]
-  vscode-airgap.sh --prune [--install-dir DIR]
-  vscode-airgap.sh --link-home [--user NAME] [--install-dir DIR]
-  vscode-airgap.sh --install-fapolicyd [--install-dir DIR]
-  vscode-airgap.sh --install-authorized-key KEY.pub --user NAME [--central-keys DIR]
-  vscode-airgap.sh --list-versions [--limit N|--all] [--format text|json] [--refresh]
-  vscode-airgap.sh --help
-
-MODES
-  online    Resolve latest (or pinned) commit, download server-linux-<arch>
-            (Remote-SSH server, mandatory), the Linux x64 desktop tarball
-            and the Windows x64 User Setup (client installers, mandatory —
-            both are needed so at least one operator platform's Help >
-            About commit matches the staged server), any --extensions /
-            --extensions-file, install the server at
-            INSTALL_DIR/bin/<commit>/ (classic) AND
-            INSTALL_DIR/code-<commit> plus
-            cli/servers/Stable-<commit>/server/ (exec-server), plus the
-            handshake tarball vscode-cli-<commit>.tar.gz with its
-            sibling .done written last. INSTALL_DIR defaults to
-            ~/.vscode-server. A path not under $HOME (typically
-            /opt/vscode-server) is treated as shared: world-readable
-            so every Remote-SSH user can execute it, and fapolicyd
-            can allow-list one directory instead of every $HOME.
-            Stage the client installers + extension VSIX for the
-            operator to pick up. Add --serve-web to also
-            fetch+start `code serve-web`, or --tunnel for real Remote
-            Tunnels (internet-only, see LIMITATIONS).
-  bundle    Same download step as online, but instead of installing, packs
-            everything into a single tarball (BUNDLE_PATH) with a
-            versions.json manifest (commit, version, arch, channel, date,
-            sha256 of every artifact — Microsoft-published where available,
-            self-computed otherwise, both recorded distinctly). Run this on
-            a machine with internet access, then carry the tarball across
-            the air gap.
-  offline   Installs from a bundle tarball with ZERO outbound network calls.
-            Refuses to run if BUNDLE_PATH is missing, and verifies every
-            artifact's sha256 against the bundle's own versions.json before
-            extracting anything. Installs both Remote-SSH layouts
-            (classic bin/<commit>/ and exec-server code-<commit> +
-            cli/servers/Stable-<commit>/server/) plus the handshake
-            tarball, and stages client installers + extensions for the
-            operator. --tunnel is rejected in this mode
-            (Remote Tunnels needs Microsoft's relay — see LIMITATIONS).
-
-OPTIONS (env var equivalents in parentheses)
-  --mode MODE             online|bundle|offline (MODE)
-  --channel CHANNEL       stable|insider, default stable (CHANNEL)
-  --version VERSION       Exact stable semver to pin, e.g. 1.96.2 (a
-                          leading 'v' is accepted and stripped: v1.96.2
-                          works too). Resolved to its commit via
-                          microsoft/vscode's git tags (ground truth,
-                          verified live 2026-08-18 — Microsoft's own APIs
-                          don't expose a semver->commit map; see
-                          docs/reference/download-urls.md), then confirmed
-                          reachable on Microsoft's CDN before use — an old
-                          version whose tag exists but whose CDN artifact
-                          has been pruned fails loudly rather than
-                          silently falling back to latest. A 2-component
-                          version (e.g. 1.96 or 1.33) picks the newest
-                          matching patch tag, then a live CDN HEAD.
-                          insider
-                          channel is not supported for --version (only
-                          stable has tagged releases in the sense this
-                          resolves) — use --commit instead. Ignored if
-                          --commit is also set. See --list-versions.
-                          (VERSION)
-  --commit COMMIT         40-char git commit hash to pin exactly. WINS over
-                          --version when both are set. Also switches
-                          checksum verification to self-computed sha256
-                          (Microsoft's /api/update/*/latest checksum
-                          endpoint only serves the CURRENT latest build per
-                          platform, confirmed live — it 204s for an older
-                          commit). (COMMIT)
-  --list-versions         Print stable VS Code releases with commit,
-                          newest first (standalone — no --mode required).
-                          Default: the most recent 10 (LIST_LIMIT=10) so
-                          the picker stays short. Use --limit N or --all
-                          for more; --version still accepts any cached
-                          tag, not only the printed rows. CDN column is
-                          from the cached availability floor (see
-                          --refresh), not a live check per row — pick
-                          with --version for an authoritative HEAD.
-                          With --bundle-path, prints the single version
-                          already staged in that bundle (offline).
-                          (LIST_VERSIONS=1)
-  --limit N               How many newest rows --list-versions prints.
-                          Default 10. 0 means all. (LIST_LIMIT)
-  --all                   Same as --limit 0: print the full tag list.
-  --format text|json      Output format for --list-versions. Default text.
-  --refresh               Force-refetch the git tag cache (also implies
-                          --force for artifact downloads). Tag list is
-                          cached at ~/.cache/vscode-airgap/ with a 24h TTL
-                          by default (TAG_CACHE_TTL, seconds).
-  --arch ARCH             The REMOTE Linux host's architecture, for the
-                          Remote-SSH server artifact:
-                          linux-x64 (default, mandatory support) |
-                          linux-arm64 | linux-armhf | alpine-x64 |
-                          alpine-arm64 | auto (detect from the arch running
-                          this script instead — only useful for the
-                          secondary --serve-web-on-this-host path). Does
-                          NOT affect the client installers, which are
-                          always Linux x64 + Windows x64 regardless of
-                          --arch. (ARCH)
-  --install-dir DIR       Where the server tree is written.
-                          Default: ~/.vscode-server (what Remote-SSH
-                          looks for). Set /opt/vscode-server (or any
-                          path not under $HOME) for a shared install
-                          every user can execute; fapolicyd then
-                          allow-lists that one directory. Pair with
-                          --link-home so ~/.vscode-server still has
-                          the presence-test files. (INSTALL_DIR)
-  --bundle-path PATH      Bundle tarball: output path (mode=bundle) or
-                          input path (mode=offline). (BUNDLE_PATH)
-  --extensions LIST       Comma-separated publisher.name IDs. (EXTENSIONS)
-  --extensions-file PATH  Newline-delimited publisher.name IDs, UTF-8,
-                          '#' comments and blank lines ignored. Unioned
-                          with --extensions (duplicates deduped).
-                          (EXTENSIONS_FILE)
-                          For each ID: queries the Marketplace gallery for
-                          every published version, prefers a linux-x64
-                          target-platform build when one exists (falls back
-                          to the platform-universal build), and picks the
-                          NEWEST version whose `engines.vscode` range
-                          accepts the bundled VS Code version (the commit's
-                          own version, e.g. 1.133.0) — not an old pin. If
-                          the query fails outright, falls back to the
-                          simple /latest/vspackage endpoint and records
-                          that fallback in versions.json (engine
-                          compatibility unverified in that case).
-  --serve-web             Also fetch the CLI + server-web artifacts and, on
-                          install, start `code serve-web` bound to
-                          BIND_ADDR:PORT. Secondary path — see LIMITATIONS.
-  --tunnel                Also fetch the CLI and, after install, run
-                          `code tunnel` instead of installing Remote-SSH's
-                          server. online mode only — see LIMITATIONS.
-  --bind ADDR             serve-web bind address, default 127.0.0.1.
-                          (BIND_ADDR)
-  --port PORT             serve-web port, default 8000 (PORT)
-  --token TOKEN           serve-web connection token; TOKEN=none runs
-                          --without-connection-token. See --serve-web.
-                          (TOKEN)
-  --download-only         Fetch/verify artifacts but do not install/start.
-  --status                Print install state for INSTALL_DIR and exit,
-                          including every commit staged there other than
-                          the installed one and the bytes it occupies.
-                          Standalone — no MODE/network/curl required.
-  --prune                 Remove every commit under INSTALL_DIR except
-                          the installed one, printing each path removed
-                          and the bytes freed. The installed one is the
-                          commit whose vscode-cli-<commit>.tar.gz.done
-                          marker exists and whose code-<commit> CLI is
-                          present; with several markers and no CLI, the
-                          newest marker. Pass --commit to name it
-                          explicitly. Refuses outright when no marker
-                          exists — an incomplete install is not a reason
-                          to delete the version that still works.
-                          Standalone — no MODE/network required.
-  --keep-old              Do not prune other commits after an install.
-                          By default an install that completes (its
-                          .done marker written) removes every other
-                          commit's bin/<commit>/, code-<commit>,
-                          cli/servers/Stable-<commit>/ and CLI archive,
-                          because only one of them can ever serve a
-                          connection and the host has no other way to
-                          reclaim the space. extensions/, data/, logs,
-                          the staged client installers and the emitted
-                          templates are version-independent and are
-                          never touched, and neither is anything
-                          outside INSTALL_DIR. (KEEP_OLD=1)
-  --emit-ssh-config       Write the templates into INSTALL_DIR and print
-                          where each one is copied (laptop ~/.ssh/config,
-                          laptop VS Code user settings.json, fapolicyd
-                          rules.d snippet, and ONE sshd drop-in per
-                          --user: <sshd-priority>-vscode-<user>.conf,
-                          scoped to `Match User <user>` so the host's
-                          hardened baseline is untouched for everyone
-                          else). Defaults to the user running it. JSONC
-                          // comments, not fake "// key" pairs.
-                          Standalone — no MODE/network required.
-                          See MULTI-USER, ONE HOST.
-  --shared                Force world-readable modes on INSTALL_DIR
-                          (0755 dirs/bins, 0644 files). Implied when
-                          INSTALL_DIR is not under $HOME. (SHARED=1)
-  --link-home             After install, or standalone: symlink
-                          Remote-SSH presence-test paths from
-                          ~/.vscode-server (or --user's home) to
-                          INSTALL_DIR. User-writable state (data,
-                          extensions, the per-commit .token) stays
-                          in the home tree. Run as root, the
-                          directories and symlinks it creates are
-                          chowned to that user — see OWNERSHIP UNDER
-                          sudo. (LINK_HOME=1)
-  --user NAME             With --link-home: operate on NAME's home
-                          instead of $HOME. With --emit-ssh-config:
-                          write NAME's sshd drop-in. Repeatable /
-                          comma-list via --link-users, and each named
-                          user gets their own file. Root required to
-                          link another user's home; NAME's home must
-                          already exist. (LINK_USERS)
-  --link-users LIST       Comma-separated user names for --link-home.
-  --install-fapolicyd     As root: write
-                          /etc/fapolicyd/rules.d/<priority>-vscode-server.rules
-                          allowing dir=INSTALL_DIR/, then
-                          fagenrules --load and restart fapolicyd.
-                          Standalone, or with --mode. fapolicyd must
-                          already be installed. A home-directory
-                          INSTALL_DIR (including the ~/.vscode-server
-                          default) is supported and warns as it goes:
-                          the rule allows everything under that
-                          directory for that user, and each further user
-                          needs a rule of their own. Prefer
-                          /opt/vscode-server where the host gives you
-                          one. (INSTALL_FAPOLICYD=1)
-  --fapolicyd-priority N  rules.d filename prefix, default 25 (before
-                          the 30-patterns.rules ld_so deny and the 90
-                          catch-all). (FAPOLICYD_PRIORITY)
-  --central-keys [DIR]    Emit the per-user sshd drop-in with
-                          AuthorizedKeysFile naming DIR/%u FIRST and
-                          .ssh/authorized_keys second. DIR defaults to
-                          /etc/ssh/authorized_keys. For hosts where sshd
-                          cannot read the home copy at all — NFS homes
-                          under SELinux. Costs 1 denied line + 1 AVC per
-                          successful login (measured; 3 of each if the
-                          home path were first). Off by default: without
-                          this flag no AuthorizedKeysFile line is
-                          emitted and the host's own key lookup
-                          (including FreeIPA AuthorizedKeysCommand) is
-                          left alone. See PUBKEY FAILS BUT PASSWORD/OTP
-                          WORKS. (CENTRAL_KEYS=1, CENTRAL_KEYS_DIR)
-  --central-keys-only [DIR]
-                          Same, but emit ONLY DIR/%u — no home path, so
-                          zero denied lines and zero AVCs per login.
-                          The drop-in is then specific to a host whose
-                          homes are unreadable: a user whose home is
-                          local would have ~/.ssh/authorized_keys
-                          ignored. Use it where /var/log/secure or the
-                          audit log ships to a SIEM and one line per
-                          login matters. (CENTRAL_KEYS_ONLY=1)
-  --install-authorized-key [FILE]
-                          As root: install a public key at
-                          <central-keys>/NAME, 0644 root:root, in a
-                          0755 root:root directory. Needs --user NAME.
-                          Reads FILE, or stdin when FILE is omitted or
-                          "-". Appends without duplicating, refuses a
-                          private key, and refuses a directory or key
-                          file that is not in the shape sshd's
-                          StrictModes accepts — it reports what is wrong
-                          instead of chowning somebody else's path into
-                          line. Runs restorecon -F where it exists and
-                          never touches an SELinux boolean. Standalone.
-  --sshd-priority N       sshd_config.d filename prefix for the
-                          emitted per-user drop-in, default 50. Raise
-                          it only if another drop-in already carries a
-                          Match block for the same user — a Match
-                          override beats the global baseline whatever
-                          the order. (SSHD_PRIORITY)
-  --force                 Re-download even if a matching cached artifact
-                          already exists. With --link-home: replace a
-                          real presence-test path with a symlink. With
-                          --install-fapolicyd: rewrite and reload even
-                          when the rule file is already identical.
-  -h, --help              This text.
-
-PROXY
-  HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured for every download —
-  curl reads them natively, and the extension-query helper (Python's
-  urllib) picks up the same standard env vars.
-
-OWNERSHIP UNDER sudo
-  Running as root is the normal way to do a shared install
-  (--install-dir /opt/vscode-server --link-home --user NAME
-  --install-fapolicyd). Remote-SSH connects AS that user and writes
-  data/, logs and a per-commit .token under ~/.vscode-server, so
-  anything root creates inside a home is chowned back to that user —
-  a root-owned tree fails the first connection with permission denied.
-
-  --link-home --user NAME   ~NAME/.vscode-server plus bin/, cli/,
-                            cli/servers/ and every symlink this run
-                            creates end up owned by NAME. A directory
-                            an earlier root run left behind is repaired
-                            too. Paths NAME already owns (data/,
-                            extensions/, tokens) are never touched.
-                            NAME's home must exist — this never creates
-                            it.
-  --mode online|offline     Only paths root actually owns under
-                            INSTALL_DIR are handed over, and only when
-                            INSTALL_DIR sits inside a user's home. A
-                            shared tree (/opt/vscode-server) and root's
-                            own /root/.vscode-server stay root-owned,
-                            which is what --shared and the fapolicyd
-                            allow-list want.
-
-  sudo resets HOME to /root on most distributions, so a bare
-  `sudo vscode-airgap.sh --mode offline ...` installs into
-  /root/.vscode-server, not the login user's home. Pass --install-dir
-  explicitly, or install as the user who will connect.
-
-MULTI-USER, ONE HOST
-  Several people share the air-gapped host, and onboarding the second
-  one must leave the first — and everyone who is not using VS Code at
-  all — exactly as they were. Every part of this is additive per user.
-
-  sshd        --emit-ssh-config --user NAME writes
-              <sshd-priority>-vscode-NAME.conf, and every directive in
-              it sits inside `Match User NAME`. The host's hardened
-              baseline (pubkey off globally, OTP through PAM) still
-              governs every other account. A colleague is a second
-              file, never an edit to the first, and re-emitting for
-              NAME rewrites only NAME's file. Checked against OpenSSH
-              8.0p1, 9.9p1 and 10.0p2:
-                sshd -T -C user=NAME          -> pubkeyauthentication yes
-                sshd -T -C user=SOMEONE-ELSE  -> baseline, unchanged
-              Drop-ins are read at the Include line in lexical order,
-              and a Match inside one does not scope the next file or
-              the rest of the parent. EL8 ships no Include line at all,
-              so add `Include /etc/ssh/sshd_config.d/*.conf` at the TOP
-              of /etc/ssh/sshd_config there or the directory is dead
-              weight. The sshd -T check tells you which case you are in.
-              Ordering only decides the GLOBAL baseline, and first
-              global value wins: on a FreeIPA host 04-ipa.conf already
-              sets PubkeyAuthentication yes globally, so a hardening
-              file that means to turn it off has to sort before that
-              (01-*, not 10-*). The per-user Match still wins either way.
-  fapolicyd   One rule for INSTALL_DIR. With a shared /opt tree that is
-              one rule for the whole host; with per-user home installs
-              it is one rule per home, which is the cost of a host that
-              only gives you a home. Either way --install-fapolicyd
-              rewrites the file only when the content actually changed,
-              so a second admin's run does not bounce fapolicyd (and its
-              decision cache) for everyone.
-  --link-home Already per user: it touches only ~NAME/.vscode-server and
-              chowns what it creates to NAME, so a run for a colleague
-              leaves the first user's links and ownership untouched.
-  install     One shared /opt/vscode-server tree that every user
-              executes. Nothing user-specific lives in it.
-
-PUBKEY FAILS BUT PASSWORD/OTP WORKS (SELinux, NFS homes, StrictModes)
-  Three different faults produce "the key does not work". Take them in
-  this order — the first two steps tell you which one you have, and
-  guessing here wastes hours.
-
-  1. /var/log/secure SAYS WHICH FAMILY IT IS
-       Could not open user 'NAME' authorized keys ...: Permission denied
-         -> sshd could not READ the file. SELinux, almost always.
-            This line is IDENTICAL for an NFS home and for a local file
-            with the wrong label. It does not tell them apart — step 2
-            does.
-       Authentication refused: bad ownership or modes for file ...
-         (and NO AVC in the audit log)
-         -> not SELinux at all. StrictModes: the key file, ~/.ssh, or
-            the home directory is group- or world-writable, or owned by
-            the wrong account. Fix the modes; stop reading this section.
-
-  2. THE AUDIT LOG DECIDES WHICH SELinux CASE
-       ausearch --input /var/log/audit/audit.log -m avc -ts recent | grep sshd
-     ALWAYS pass --input. Bare `ausearch -m avc` consults the current
-     log only and answers "<no matches>" on a host whose audit log has
-     rotated, while the AVCs sit in the file it just skipped.
-       tcontext=...:nfs_t          -> NFS home. Go to step 4.
-       tcontext=...:default_t
-                    tmp_t, var_t, admin_home_t, unlabeled_t,
-                    httpd_sys_content_t
-                                   -> LOCAL file with the wrong label,
-                                      typically created elsewhere and
-                                      moved in, or restored from a
-                                      backup that carried no labels.
-                                      Go to step 3.
-       tcontext=...:user_home_t or user_tmp_t
-                                   -> NOT the problem. sshd_t reads
-                                      both of these on EL9 targeted
-                                      policy. Keep looking.
-       no AVC at all               -> back to step 1.
-
-  3. LOCAL MISLABEL — CONFIRM, THEN RELABEL
-       matchpathcon -V ~NAME/.ssh/authorized_keys
-       restorecon -Rv ~NAME/.ssh
-     That is the whole fix. Nothing in this tool is involved.
-
-  4. NFS HOME — restorecon IS NOT A FIX HERE
-     Run any label check (ls -Z, matchpathcon) AS THE USER, not with
-     sudo. Under root_squash root is mapped to nobody, cannot traverse a
-     0700 ~/.ssh, and fails with a plain "Permission denied" before
-     SELinux is ever consulted — so `sudo restorecon -R ~NAME/.ssh`
-     reports a permission error that has nothing to do with labels and
-     looks like a third, non-existent problem.
-     On an NFS mount, run as the user who can actually read the path:
-       restorecon  exits 0 and changes NOTHING. A silent no-op, and the
-                   most common false trail in this whole area.
-       chcon       fails outright: "Operation not supported".
-       relabelling the file on the SERVER does not help either — the
-                   client assigns nfs_t through genfscon whatever the
-                   backing file is labelled.
-     Two real options, and you want exactly one of them:
-       (a) CENTRAL KEY DIRECTORY (this tool) — preferred. Needs no
-           SELinux authority and changes nothing for anyone else:
-             vscode-airgap.sh --install-authorized-key ~/.ssh/id_ed25519.pub \
-               --user NAME
-             vscode-airgap.sh --emit-ssh-config --central-keys --user NAME
-             cp <priority>-vscode-NAME.conf /etc/ssh/sshd_config.d/
-             sshd -t && systemctl reload sshd
-           The key lives at /etc/ssh/authorized_keys/NAME on local disk
-           (etc_t, which sshd_t may always read) and the drop-in points
-           sshd there FIRST, .ssh/authorized_keys still second.
-           It does NOT silence the log. Measured per successful login on
-           an enforcing host: home path first 3 denied lines + 3 AVCs,
-           central first 1 + 1 (sshd consults the second path once even
-           after the first matched), central only 0 + 0. Reach for
-           --central-keys-only when that last line per login matters —
-           a SIEM-shipping host — and accept that the drop-in is then
-           specific to unreadable homes.
-       (b) setsebool -P use_nfs_home_dirs on — host-wide, needs policy
-           authority on the box, and configuration management may revert
-           it. This tool never sets a boolean; that is the host owner's
-           call, not a side effect of staging an editor.
-     DO NOT DO BOTH. The boolean makes the home copy readable again,
-     which masks a central-dir install that is not actually working —
-     you find out the day someone turns the boolean off.
-
-  Whatever you land on, `sshd -T -C user=NAME | grep -i authorizedkeysfile`
-  is what says which paths sshd will really try, and the same command
-  for a control user says nobody else moved.
+  vscode-airgap.sh --mode bundle  [--version V] [--extensions-file F]
+  vscode-airgap.sh --mode offline --bundle-path B [--link-home [--user LIST] | --all-users]
+  vscode-airgap.sh --mode online  [--link-home]
+  vscode-airgap.sh --link-home [--user LIST] | --all-users
+  vscode-airgap.sh --emit-ssh-config [--user LIST] [--central-keys]
+  vscode-airgap.sh --install-fapolicyd
+  vscode-airgap.sh --install-authorized-key KEY.pub [--user NAME]
+  vscode-airgap.sh --status | --prune
+  vscode-airgap.sh --list-versions [--limit N | --all] [--format json]
 
 EXAMPLES
-  # Online side: latest stable, install Remote-SSH server + both client
-  # installers into ~/.vscode-server, with two extensions from a file
-  ./vscode-airgap.sh --mode online --extensions-file team-extensions.txt
+  VSA=/usr/local/bin/vscode-airgap.sh
+  VSCODE_VER=1.139.1
 
-  # Online side: pin an exact commit, build a portable bundle
-  COMMIT=a5b500951314efd502d07465bd138dfbd714a960 \
-    ./vscode-airgap.sh --mode bundle --bundle-path ./vscode-bundle.tar.gz \
-    --extensions ms-python.python
+  # Online side: build vscode-bundle-v1.139.1.tar.gz in the current directory
+  sudo $VSA --mode bundle --version $VSCODE_VER --extensions ms-python.python
 
-  # Carry vscode-bundle.tar.gz to the air-gapped host. Shared install
-  # (as root), then per-user presence-test links:
-  sudo ./vscode-airgap.sh --mode offline --bundle-path ./vscode-bundle.tar.gz \
-    --install-dir /opt/vscode-server --link-home --user youruser \
-    --install-fapolicyd
+  # Air-gapped host, first install: /opt/vscode-server, links, fapolicyd rule
+  sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz \
+    --link-home --user alice,bob --install-fapolicyd
 
-  # Print ssh_config + JSONC settings.json + fapolicyd rule + one
-  # Match-scoped sshd drop-in per user. /opt/vscode-server is root-owned,
-  # so emitting into it needs sudo — or use a directory you own.
-  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
-    --user alice --user bob
-  ./vscode-airgap.sh --emit-ssh-config --install-dir ~/vscode-templates \
-    --user alice --user bob
+  # Update: install, then relink everyone who has connected before
+  sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz \
+    --all-users
 
-  # NFS home + SELinux enforcing: put the key where sshd can read it and
-  # point sshd at it, for this user only
-  sudo ./vscode-airgap.sh --install-authorized-key ~alice/.ssh/id_ed25519.pub --user alice
-  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server \
-    --user alice --central-keys
-  sudo cp /opt/vscode-server/50-vscode-alice.conf /etc/ssh/sshd_config.d/
-  sudo sshd -t && sudo systemctl reload sshd
-  sudo sshd -T -C user=alice | grep -i authorizedkeysfile
+  # Onboard one more user against the installed commit
+  sudo $VSA --link-home --user carol
 
-  # Onboard a colleague later: their own sshd file, their own links,
-  # nothing of alice's rewritten
-  sudo ./vscode-airgap.sh --link-home --user carol --install-dir /opt/vscode-server
-  sudo ./vscode-airgap.sh --emit-ssh-config --install-dir /opt/vscode-server --user carol
+  # Client ssh_config, settings.json, fapolicyd rule, one sshd drop-in per user
+  sudo $VSA --emit-ssh-config --user alice,bob
 
-  # Optional secondary path: serve-web instead of / alongside Remote-SSH
-  ./vscode-airgap.sh --mode online --serve-web
+  # NFS home under SELinux: central key file plus a drop-in that reads it
+  sudo $VSA --install-authorized-key ~alice/.ssh/id_ed25519.pub \
+    --user alice
+  sudo $VSA --emit-ssh-config --user alice --central-keys
 
-  # See what else is staged, then reclaim the space
-  ./vscode-airgap.sh --status --install-dir /opt/vscode-server
-  sudo ./vscode-airgap.sh --prune --install-dir /opt/vscode-server
+  # What is staged, then remove every commit but the installed one
+  sudo $VSA --status
+  sudo $VSA --prune
 
-  # Match an already-running remote server instead of always fetching latest:
-  # 1. On the remote, find its exact commit (no network needed):
-  #      ./vscode-airgap.sh --status
-  #      # or: cat ~/.vscode-server/bin/*/product.json
-  # 2. On a connected host, see what semver that commit corresponds to and
-  #    pick a version explicitly instead of re-resolving "latest" every run:
-  ./vscode-airgap.sh --list-versions | head -20
-  ./vscode-airgap.sh --mode bundle --version 1.96.2 --bundle-path ./v1.96.2.tar.gz
+DEFAULTS
+  --user          the account that ran sudo ($SUDO_USER)
+  --install-dir   /opt/vscode-server as root, ~/.vscode-server otherwise
+  --bundle-path   vscode-bundle-v<version>.tar.gz (bundle mode)
+  --link-home     replaces an existing real path with the symlink
 
-LIMITATIONS — READ THIS BEFORE CHOOSING --tunnel OR --serve-web
-  Microsoft's Remote Tunnels (`code tunnel`) are NOT air-gap compatible.
-  The CLI authenticates against github.com/login.microsoftonline.com and
-  then keeps a persistent outbound connection to Microsoft's tunnel relay
-  for the lifetime of the tunnel — there is no offline or self-hosted
-  relay mode. Online mode only; offline mode refuses --tunnel outright.
+OPTIONS (env var in brackets)
+  --mode online|bundle|offline   (MODE)
+  --version V                    stable semver, e.g. 1.139.1 or 1.139 (VERSION)
+  --commit SHA                   40-char commit, wins over --version (COMMIT)
+  --channel stable|insider       default stable (CHANNEL)
+  --arch ARCH                    remote host: linux-x64 (default), linux-arm64,
+                                 linux-armhf, alpine-x64, alpine-arm64, auto (ARCH)
+  --install-dir DIR              (INSTALL_DIR)
+  --bundle-path PATH             bundle output (bundle) or input (offline) (BUNDLE_PATH)
+  --extensions LIST              comma-separated publisher.name (EXTENSIONS)
+  --extensions-file PATH         one publisher.name per line, # comments (EXTENSIONS_FILE)
+  --link-home [USER]             link ~USER/.vscode-server to INSTALL_DIR (LINK_HOME=1)
+  --all-users                    --link-home for every account that has a
+                                 ~/.vscode-server (ALL_USERS=1)
+  --user LIST                    comma list, repeatable; for --link-home,
+                                 --emit-ssh-config, --install-authorized-key (LINK_USERS)
+  --install-fapolicyd            write and load the fapolicyd rule (INSTALL_FAPOLICYD=1)
+  --fapolicyd-priority N         rules.d prefix, default 25 (FAPOLICYD_PRIORITY)
+  --emit-ssh-config              write client and sshd templates into INSTALL_DIR
+  --sshd-priority N              sshd_config.d prefix, default 50 (SSHD_PRIORITY)
+  --central-keys [DIR]           drop-in reads DIR/%u first (/etc/ssh/authorized_keys)
+  --central-keys-only [DIR]      drop-in reads DIR/%u only
+  --install-authorized-key [F]   append a public key (F or stdin) to the central key dir
+  --status                       show installed and other staged commits
+  --prune                        remove every commit but the installed one
+  --keep-old                     do not prune after an install (KEEP_OLD=1)
+  --shared                       force world-readable modes (SHARED=1)
+  --download-only                fetch and verify, do not install
+  --list-versions                stable releases with commits, newest 10 (LIST_LIMIT)
+  --limit N | --all              rows for --list-versions
+  --format text|json             output for --list-versions
+  --refresh                      refetch the tag cache and artifacts
+  --force                        re-download cached artifacts, reload an unchanged
+                                 fapolicyd rule
+  --serve-web                    also fetch and start `code serve-web` (secondary path)
+  --bind ADDR --port N --token T serve-web listener, default 127.0.0.1:8000
+                                 (BIND_ADDR, PORT, TOKEN)
+  --tunnel                       Microsoft Remote Tunnels, online mode only
+  -h, --help
 
-  `code serve-web` works air-gapped (no relay involved) but is now the
-  SECONDARY path — the primary answer to "a client can connect to an
-  air-gapped VS Code Server" is Remote-SSH over the port that's already
-  open (22), which is what --mode online/offline do by default. Pass
-  --serve-web only if you specifically want the browser-based path too.
-
-  There is no VS Code setting that means "never attempt any server
-  download, ever". `remote.SSH.localServerDownload: "off"` is still
-  required: a staging miss otherwise wget -O truncates the CLI tarball
-  to zero bytes and the install script polls forever. The fail-closed
-  mechanism is what this script does: pre-stage BOTH Remote-SSH layouts
-  BEFORE the first connection, so whichever bootstrap script arrives,
-  its presence test passes and the download branch is never entered.
-
-  CIS/STIG hosts commonly mount /tmp noexec AND run fapolicyd, which
-  denies execute from $HOME and /tmp (Remote-SSH's default write
-  locations). Where the host gives you a shared path, put INSTALL_DIR at
-  /opt/vscode-server, allow-list that one directory in fapolicyd
-  (--install-fapolicyd), and --link-home so the presence tests in
-  ~/.vscode-server are symlinks to /opt. Where a home directory is all
-  you get, keep the default INSTALL_DIR and allow-list that home tree
-  instead — --install-fapolicyd does it and warns what it costs. An
-  un-allow-listed HOME install fails with "Operation not permitted" or
-  exec format error (126); /tmp stays unusable either way because of
-  noexec.
-
-  THAT ALSO APPLIES TO THIS SCRIPT. On a fapolicyd-enforcing host,
-    sudo /tmp/vscode-airgap.sh --mode offline ...
-  fails with a bare "Permission denied" and nothing else — fapolicyd
-  denied the execve because the file is not in the trust database, and
-  /tmp is usually noexec besides. It is not a sudo problem, and the
-  message does not say fapolicyd anywhere. Either hand the script to an
-  interpreter that IS trusted, so the script is only ever read as data:
-    sudo bash /tmp/vscode-airgap.sh --mode offline ...
-  or put it somewhere trusted first (/usr/local/bin, /opt) and run it
-  normally. Same for the bundle: it is data, tar reads it, so its
-  location does not matter.
-
-  Also set
-  remote.SSH.remoteServerListenOnSocket: false in settings.json —
-  true silently forces useLocalServer off (Windows ignores the UI
-  toggle). See docs/runbooks/remote-ssh-realm-otp.md.
+NOTES
+  EL sudo leaves /usr/local/bin off PATH (secure_path): call it by full path.
+  On a fapolicyd host run the script as data: sudo bash /path/vscode-airgap.sh ...
+  Set remote.SSH.localServerDownload "off" on the client (--emit-ssh-config writes it).
+  HTTPS_PROXY, HTTP_PROXY and NO_PROXY are honoured.
+  Runbooks: docs/runbooks/ in this repo.
 EOF
 }
 
@@ -692,6 +247,7 @@ while [ $# -gt 0 ]; do
       LINK_USERS="${LINK_USERS:+$LINK_USERS,}$2"
       shift 2
       ;;
+    --all-users) LINK_HOME=1; ALL_USERS=1; shift ;;
     --install-fapolicyd) INSTALL_FAPOLICYD=1; shift ;;
     --fapolicyd-priority) need_value "$@"; FAPOLICYD_PRIORITY="$2"; shift 2 ;;
     --sshd-priority) need_value "$@"; SSHD_PRIORITY="$2"; shift 2 ;;
@@ -1647,12 +1203,14 @@ write_manifest() {
 
 # ── BUNDLE mode ───────────────────────────────────────────────────────────
 run_bundle() {
-  [ -n "$BUNDLE_PATH" ] || die "--bundle-path is required in bundle mode"
   local bundle_owner
-  bundle_owner="$(owner_for_tree "$BUNDLE_PATH")"
   _STAGE_DIR="$(mktemp -d)"
   trap cleanup_stage_dir EXIT
   stage_artifacts "$_STAGE_DIR"
+  if [ -z "$BUNDLE_PATH" ]; then
+    BUNDLE_PATH="vscode-bundle-v$(json_field "$_STAGE_DIR/versions.json" vscode_version).tar.gz"
+  fi
+  bundle_owner="$(owner_for_tree "$BUNDLE_PATH")"
   mkdir -p "$(dirname "$BUNDLE_PATH")"
   # macOS tar otherwise writes LIBARCHIVE.xattr.com.apple.provenance
   # headers; GNU tar on the air-gapped host warns and ignores them.
@@ -1660,9 +1218,8 @@ run_bundle() {
   # A bundle root writes into a user's home stays theirs to carry away.
   own_paths "$bundle_owner" "$BUNDLE_PATH"
   log "bundle written: $BUNDLE_PATH ($(du -h "$BUNDLE_PATH" | awk '{print $1}'))"
-  log "carry this file across the air gap, log in as the SAME user Remote-SSH" \
-      "will connect as, then run:"
-  log "  $SELF --mode offline --bundle-path <path-to-bundle>"
+  log "carry this file across the air gap, then run:"
+  log "  sudo $SELF --mode offline --bundle-path $(basename "$BUNDLE_PATH") --link-home"
 }
 
 # ── ONLINE mode ────────────────────────────────────────────────────────────
@@ -1931,11 +1488,8 @@ link_one_user() {
       fi
       rm -f "$to"
     elif [ -e "$to" ]; then
-      if [ "$FORCE" = "1" ]; then
-        rm -rf "$to"
-      else
-        die "refusing to replace $to (already exists). Pass --force to replace with a symlink to $from"
-      fi
+      warn "replacing $to with a symlink to $from"
+      rm -rf "$to"
     fi
     ln -s "$from" "$to"
     own_paths "$owner" "$to"
@@ -1950,22 +1504,64 @@ link_one_user() {
   [ -e "$src/vscode-cli-$commit.tar.gz.done" ] \
     && _link_replace "$src/vscode-cli-$commit.tar.gz.done" "$dest_root/vscode-cli-$commit.tar.gz.done"
   [ -f "$src/versions.json" ] && _link_replace "$src/versions.json" "$dest_root/versions.json"
+  # Links into INSTALL_DIR whose target a prune removed: an older commit.
+  local stale
+  for stale in "$dest_root"/bin/* "$dest_root"/code-* "$dest_root"/cli/servers/Stable-* \
+      "$dest_root"/vscode-cli-*; do
+    if [ -L "$stale" ] && [ ! -e "$stale" ]; then
+      case "$(readlink "$stale")" in
+        "$src"/*) rm -f "$stale"; log "removed stale link $stale" ;;
+      esac
+    fi
+  done
   [ -n "$owner" ] && owned=" [owned by $user, uid:gid $owner]"
   log "linked Remote-SSH presence tests for $user: $dest_root -> $src (commit ${commit:0:12}...)${owned}"
 }
 
+# Every non-root account whose home already has a .vscode-server, which
+# is everyone who has connected with Remote-SSH before. getent passwd
+# covers local accounts; /home/* covers directory users that sssd does
+# not enumerate.
+all_link_users() {
+  local u h
+  { getent passwd | awk -F: '$3 != 0 {print $1}'
+    for h in /home/*; do
+      if [ -d "$h/.vscode-server" ]; then stat -c %U "$h"; fi
+    done
+  } 2>/dev/null | sort -u | while read -r u; do
+    case "$u" in ''|root|UNKNOWN) continue ;; esac
+    h="$(getent passwd "$u" 2>/dev/null | awk -F: '{print $6}')"
+    if [ -n "$h" ] && [ -d "$h/.vscode-server" ]; then
+      printf '%s\n' "$u"
+    fi
+  done
+}
+
 run_link_home() {
-  local users="$LINK_USERS" u
-  if [ -z "$users" ]; then
-    users="$(id -un)"
+  local users="$LINK_USERS" u rc
+  if [ "$ALL_USERS" = "1" ]; then
+    is_root || die "--all-users requires root"
+    users="${users:+$users,}$(all_link_users | paste -sd, -)"
+    [ -n "$users" ] || { warn "--all-users: no account has a ~/.vscode-server yet"; return 0; }
+    log "--all-users: $users"
   fi
+  [ -n "$users" ] || users="$(invoking_user)"
   IFS=', ' read -r -a _link_arr <<< "$users"
   for u in "${_link_arr[@]}"; do
     [ -n "$u" ] || continue
     if [ "$u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
       die "--user $u requires root"
     fi
-    link_one_user "$u"
+    if [ "$ALL_USERS" = "1" ]; then
+      # One unreadable home (NFS root_squash) must not stop the rest.
+      set +e
+      ( set -e; link_one_user "$u" )
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] || warn "link-home: skipped $u (exit $rc)"
+    else
+      link_one_user "$u"
+    fi
   done
 }
 
@@ -2897,11 +2493,21 @@ ${extra}
 EOF
 }
 
+# The account a --user default means: the login user behind sudo, else
+# whoever is running this.
+invoking_user() {
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    printf '%s' "$SUDO_USER"
+  else
+    id -un
+  fi
+}
+
 # Which users --emit-ssh-config writes an sshd drop-in for: --user /
 # --link-users when given, otherwise whoever is running it.
 emit_user_list() {
   local users="$LINK_USERS"
-  [ -n "$users" ] || users="$(id -un)"
+  [ -n "$users" ] || users="$(invoking_user)"
   printf '%s' "$users" | tr ', ' '\n' | grep -v '^$' || true
 }
 
