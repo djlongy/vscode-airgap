@@ -113,7 +113,7 @@ EXAMPLES
   VSCODE_VER=1.139.1
 
   # Online side: build vscode-bundle-v1.139.1.tar.gz in the current directory
-  sudo $VSA --mode bundle --version $VSCODE_VER --extensions ms-python.python
+  sudo $VSA --mode bundle --version $VSCODE_VER --extensions extensions.txt
 
   # Air-gapped host, first install: /opt/vscode-server, links, fapolicyd rule
   sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz \
@@ -153,8 +153,9 @@ OPTIONS (env var in brackets)
                                  linux-armhf, alpine-x64, alpine-arm64, auto (ARCH)
   --install-dir DIR              (INSTALL_DIR)
   --bundle-path PATH             bundle output (bundle) or input (offline) (BUNDLE_PATH)
-  --extensions LIST              comma-separated publisher.name (EXTENSIONS)
-  --extensions-file PATH         one publisher.name per line, # comments (EXTENSIONS_FILE)
+  --extensions LIST|FILE         comma-separated publisher.name, or a file with one
+                                 per line, # comments (EXTENSIONS)
+  --extensions-file FILE         same as --extensions FILE (EXTENSIONS_FILE)
   --link-home [USER]             link ~USER/.vscode-server to INSTALL_DIR (LINK_HOME=1)
   --all-users                    --link-home for every account that has a
                                  ~/.vscode-server (ALL_USERS=1)
@@ -1086,9 +1087,19 @@ stage_artifacts() {
   fi
 
   # -- Extensions: union of --extensions and --extensions-file, deduped --
+  # An --extensions item that names a file is read as a list; a
+  # publisher.name ID is never an existing path, so nothing is ambiguous.
   local ext_dir="$stage_dir/extensions"
-  local all_ext_ids="" ext_results=()
-  [ -n "$EXTENSIONS" ] && all_ext_ids="$(echo "$EXTENSIONS" | tr ',' '\n')"
+  local all_ext_ids="" ext_results=() item
+  if [ -n "$EXTENSIONS" ]; then
+    while IFS= read -r item; do
+      if [ -f "$item" ]; then
+        all_ext_ids="$(printf '%s\n%s\n' "$all_ext_ids" "$(read_extensions_file "$item")")"
+      else
+        all_ext_ids="$(printf '%s\n%s\n' "$all_ext_ids" "$item")"
+      fi
+    done <<< "$(printf '%s\n' "$EXTENSIONS" | tr ',' '\n')"
+  fi
   if [ -n "$EXTENSIONS_FILE" ]; then
     all_ext_ids="$(printf '%s\n%s\n' "$all_ext_ids" "$(read_extensions_file "$EXTENSIONS_FILE")")"
   fi
