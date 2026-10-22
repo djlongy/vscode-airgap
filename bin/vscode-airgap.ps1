@@ -4,15 +4,55 @@
   vscode-airgap.sh --mode offline installs on the air-gapped Linux host.
 
 .DESCRIPTION
-  Only --mode bundle and --list-versions exist here. Installing, linking
+  Only -Mode bundle and -ListVersions exist here. Installing, linking
   and the sshd/fapolicyd templates happen on the Linux host with
   vscode-airgap.sh. The bundle layout and versions.json match what
   vscode-airgap.sh --mode bundle writes, field for field.
 
+.PARAMETER Mode
+  bundle: download the server, CLI, clients and extensions into one tar.gz.
+
+.PARAMETER Version
+  Release to stage, X.Y.Z or X.Y (newest matching patch). Default: latest stable.
+
+.PARAMETER Commit
+  40-character commit. Wins over -Version.
+
+.PARAMETER Arch
+  Remote host platform: linux-x64 (default), linux-arm64, linux-armhf, alpine-x64.
+
+.PARAMETER BundlePath
+  Bundle to write. Default: vscode-bundle-v<version>.tar.gz in the current folder.
+
+.PARAMETER Extensions
+  Comma list of publisher.name IDs, or files with one ID per line.
+
+.PARAMETER ExtensionsFile
+  File with one publisher.name ID per line.
+
+.PARAMETER ListVersions
+  Print stable releases with their commits, newest first.
+
+.PARAMETER Limit
+  Rows for -ListVersions. Default: 10.
+
+.PARAMETER All
+  Every row for -ListVersions.
+
+.PARAMETER Format
+  Output for -ListVersions: text (default) or json.
+
 .EXAMPLE
-  .\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -Extensions extensions.txt
+  .\vscode-airgap.ps1 -Mode bundle
+.EXAMPLE
+  .\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -BundlePath C:\bundles\vscode-bundle-v1.143.0.tar.gz
+.EXAMPLE
+  .\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -Extensions extensions.txt,ms-python.python
 .EXAMPLE
   .\vscode-airgap.ps1 -ListVersions -Limit 5
+.EXAMPLE
+  vscode-airgap.bat -Mode bundle -Version 1.143.0
+  Same arguments, run with -ExecutionPolicy Bypass for a host that blocks scripts.
 #>
 [CmdletBinding()]
 param(
@@ -79,9 +119,9 @@ function Resolve-VersionToCommit([string]$wanted) {
   $hit = $rows | Where-Object { $_.Key -eq $norm } | Select-Object -First 1
   if (-not $hit -and ($norm.Split('.').Count -eq 2)) {
     $hit = $rows | Where-Object { $_.Key.StartsWith("$norm.") } | Select-Object -First 1
-    if ($hit) { Log "--version $wanted -> newest matching tag $($hit.Key)" }
+    if ($hit) { Log "-Version $wanted -> newest matching tag $($hit.Key)" }
   }
-  if (-not $hit) { Die "--version '$wanted' not found in microsoft/vscode's stable tags. Run with -ListVersions to see what is available." }
+  if (-not $hit) { Die "-Version '$wanted' not found in microsoft/vscode's stable tags. Run with -ListVersions to see what is available." }
   $hit = @{ Key = $hit.Key; Value = (Get-TagCommit $hit.Value) }
   Log "checking CDN availability for $($hit.Key) (commit $($hit.Value.Substring(0,12))...)"
   try { Invoke-WebRequest @Web -Method Head -Uri "$UpdateHost/commit:$($hit.Value)/server-linux-x64/$Channel" -TimeoutSec 20 | Out-Null }
@@ -175,7 +215,7 @@ function Read-ExtensionIds {
     if ($item -and (Test-Path -LiteralPath $item -PathType Leaf)) { $lines += Get-Content -LiteralPath $item } else { $lines += $item }
   }
   if ($ExtensionsFile) {
-    if (-not (Test-Path -LiteralPath $ExtensionsFile -PathType Leaf)) { Die "--extensions-file not found: $ExtensionsFile" }
+    if (-not (Test-Path -LiteralPath $ExtensionsFile -PathType Leaf)) { Die "-ExtensionsFile not found: $ExtensionsFile" }
     $lines += Get-Content -LiteralPath $ExtensionsFile
   }
   foreach ($l in $lines) { $t = "$l".Trim(); if ($t -and -not $t.StartsWith('#')) { $ids += $t } }
@@ -186,7 +226,7 @@ function Read-ExtensionIds {
 
 function Invoke-Bundle {
   if ($Version -and $Commit) { Log "WARN:  both -Version ($Version) and -Commit are set; -Commit wins"; $script:Version = '' }
-  elseif ($Version) { $script:Commit = Resolve-VersionToCommit $Version; Log "resolved --version $Version -> commit $($Commit.Substring(0,12))..." }
+  elseif ($Version) { $script:Commit = Resolve-VersionToCommit $Version; Log "resolved -Version $Version -> commit $($Commit.Substring(0,12))..." }
 
   $stage = Join-Path ([IO.Path]::GetTempPath()) ("vscode-airgap-" + [guid]::NewGuid())
   New-Item -ItemType Directory -Path $stage | Out-Null
@@ -281,4 +321,4 @@ function Invoke-ListVersions {
 
 if ($ListVersions) { Invoke-ListVersions }
 elseif ($Mode -eq 'bundle') { Invoke-Bundle }
-else { Get-Help $MyInvocation.MyCommand.Path; exit 2 }
+else { Get-Help $MyInvocation.MyCommand.Path -Detailed; exit 2 }

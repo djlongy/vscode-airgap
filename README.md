@@ -43,13 +43,21 @@ sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --all-u
 ## Windows online side
 
 `bin/vscode-airgap.ps1` builds the same bundle on Windows 10 1803 or later (PowerShell 5.1
-and the built-in `tar.exe`). `bin/vscode-airgap.bat` runs it with `-ExecutionPolicy Bypass`.
-Only bundle and list-versions exist there: install on the Linux host with `vscode-airgap.sh`.
+and the built-in `tar.exe`). Only `-Mode bundle` and `-ListVersions` exist there: install on
+the Linux host with `vscode-airgap.sh`. Full help: `Get-Help .\vscode-airgap.ps1 -Detailed`.
+
+```powershell
+.\vscode-airgap.ps1 -Mode bundle
+.\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -BundlePath C:\bundles\vscode-bundle-v1.143.0.tar.gz
+.\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -Extensions extensions.txt,ms-python.python
+.\vscode-airgap.ps1 -ListVersions -Limit 5
+```
+
+Where the execution policy blocks scripts, `bin\vscode-airgap.bat` runs the ps1 with
+`-ExecutionPolicy Bypass` and takes the same arguments, from `cmd.exe` or PowerShell:
 
 ```bat
 vscode-airgap.bat -Mode bundle -Version 1.143.0
-vscode-airgap.bat -Mode bundle -Version 1.143.0 -Extensions extensions.txt,ms-python.python
-vscode-airgap.bat -ListVersions -Limit 5
 ```
 
 | Name | Default | Purpose |
