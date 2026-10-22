@@ -40,6 +40,35 @@ sudo $VSA --mode bundle --version $VSCODE_VER
 sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --all-users
 ```
 
+## Windows online side
+
+`bin/vscode-airgap.ps1` builds the same bundle on Windows 10 1803 or later (PowerShell 5.1
+and the built-in `tar.exe`). `bin/vscode-airgap.bat` runs it with `-ExecutionPolicy Bypass`.
+Only bundle and list-versions exist there: install on the Linux host with `vscode-airgap.sh`.
+
+```bat
+vscode-airgap.bat -Mode bundle -Version 1.143.0
+vscode-airgap.bat -Mode bundle -Version 1.143.0 -Extensions extensions.txt,ms-python.python
+vscode-airgap.bat -ListVersions -Limit 5
+```
+
+| Name | Default | Purpose |
+|---|---|---|
+| `-Mode bundle` | none | Build the bundle |
+| `-Version` | latest stable | Release to stage, `X.Y.Z` or `X.Y` |
+| `-Commit` | none | 40-char commit, wins over `-Version` |
+| `-Arch` | `linux-x64` | Remote host: `linux-x64`, `linux-arm64`, `linux-armhf`, `alpine-x64` |
+| `-BundlePath` | `vscode-bundle-v<version>.tar.gz` | Bundle to write |
+| `-Extensions` | none | Comma list of `publisher.name` or files with one per line |
+| `-ExtensionsFile` | none | File with one `publisher.name` per line |
+| `-ListVersions` | off | Stable releases with commits, newest first |
+| `-Limit N` / `-All` | 10 | Rows for `-ListVersions` |
+| `-Format text\|json` | text | Output for `-ListVersions` |
+
+`HTTPS_PROXY` is honoured, otherwise the system proxy. The bundle holds the same files as
+one built by `vscode-airgap.sh --mode bundle`, byte for byte, and `versions.json` differs
+only in `built_at_utc`.
+
 ## Preconditions
 
 - Each user's home exists. Nothing here creates a home.
