@@ -1241,7 +1241,9 @@ run_bundle() {
   COPYFILE_DISABLE=1 tar -C "$_STAGE_DIR" --exclude='._*' -czf "$BUNDLE_PATH" .
   # A bundle root writes into a user's home stays theirs to carry away.
   own_paths "$bundle_owner" "$BUNDLE_PATH"
-  log "bundle written: $BUNDLE_PATH ($(du -h "$BUNDLE_PATH" | awk '{print $1}'))"
+  # File length, not du: du reports allocated blocks, which differ between
+  # runs for the same bytes (XFS preallocation, filesystem block size).
+  log "bundle written: $BUNDLE_PATH ($(wc -c < "$BUNDLE_PATH" | awk '{printf "%d", $1 / 1048576 + 0.5}') MB)"
   log "carry this file across the air gap, then run:"
   log "  sudo $SELF --mode offline --bundle-path $(basename "$BUNDLE_PATH") --link-home"
 }
