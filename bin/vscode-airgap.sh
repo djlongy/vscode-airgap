@@ -587,6 +587,19 @@ for sha, ver, peeled in pat.findall(raw):
     if peeled:
         versions[ver] = sha  # dereferenced annotated tag always wins
 
+# Microsoft publishes a release on the CDN before it pushes the git tag
+# (1.143.0 was live with no tag). Add the CDN's latest stable build so
+# --version can pick it as soon as it ships.
+try:
+    import json
+    with urllib.request.urlopen(f"{update_host}/api/update/server-linux-x64/stable/latest", timeout=15) as r:
+        latest = json.load(r)
+    ver, sha = latest.get("productVersion", ""), latest.get("version", "")
+    if re.fullmatch(r"\d+\.\d+\.\d+", ver) and re.fullmatch(r"[0-9a-f]{40}", sha):
+        versions.setdefault(ver, sha)
+except Exception as e:
+    sys.stderr.write(f"[tag cache] CDN latest lookup failed, using git tags only: {e}\n")
+
 def semver_key(v):
     return tuple(int(x) for x in v.split("."))
 
