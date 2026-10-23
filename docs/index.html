@@ -132,7 +132,7 @@ button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); backgro
       <span>djlongy/vscode-airgap</span>
     </a>
   </div>
-  <p>Remote-SSH only connects when your laptop and the Linux host run the same VS Code commit. Download that commit's files here, carry them over, and install them on the host. No PowerShell. Everything runs in your browser.</p>
+  <p>Remote-SSH only connects when the VS Code you connect from and the Linux host run the same commit. Download that commit's files here, carry them over, and install them on the host. No PowerShell. Everything runs in your browser.</p>
   <div class="commit" aria-live="polite">
     <div class="commit-hash" id="commit-hash"></div>
     <p class="commit-note" id="commit">Finding the latest release...</p>
@@ -147,7 +147,7 @@ button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); backgro
       <div class="step-n">1</div>
       <div>
         <h2>Choose the release</h2>
-        <p>Match the version your laptops run, or pick the one you are moving them to.</p>
+        <p>Match the VS Code version you connect from, or the one you are updating to.</p>
         <div class="pickers">
           <div><label for="ver">VS Code version</label><select id="ver"><option>Loading...</option></select></div>
           <div><label for="arch">Linux host</label>
@@ -254,7 +254,7 @@ async function loadRelease() {
     if (metas.some(m => m.version !== commit)) throw new Error('artifacts disagree on the commit');
     release = { version: ver, commit, artifacts: wanted.map(([key, , name], i) => ({ key, name, url: metas[i].url, sha256: metas[i].sha256hash, done: false })) };
     $('commit-hash').innerHTML = commit.match(/.{1,8}/g).map(g => `<span>${g}</span>`).join('');
-    $('commit').textContent = `VS Code ${ver} is commit ${commit.slice(0, 12)}. Your laptops and the host must both run it.`;
+    $('commit').textContent = `VS Code ${ver} is commit ${commit.slice(0, 12)}. Your VS Code and the host must both run it.`;
   } catch (e) {
     $('commit').className = 'commit-note bad';
     $('commit').textContent = `Microsoft has no ${ver} build for this Linux host. Pick another version or host. (${e.message})`;
