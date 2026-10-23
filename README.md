@@ -40,6 +40,32 @@ sudo $VSA --mode bundle --version $VSCODE_VER
 sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --all-users
 ```
 
+## Browser online side
+
+`docs/index.html` does the online side in a browser, for a Windows host that cannot run
+PowerShell. Serve it from GitHub Pages or open the file locally.
+
+1. Pick the version and remote arch.
+2. Paste extension IDs, or drop `extensions.txt` on the page.
+3. Click Download all. It saves the four VS Code files and `vscode-extras-v<version>.tar`,
+   which holds `versions.json` with Microsoft's sha256 values and the engine-matched
+   `.vsix` files.
+4. Copy all five files into one folder on the air-gapped host and install from it:
+
+```sh
+sudo /usr/local/bin/vscode-airgap.sh --mode offline --bundle-path /path/to/folder --all-users
+```
+
+`--bundle-path` with a folder finds each binary by sha256, so browser file names do not
+matter, then installs as from a bundle. The page links the binaries because Microsoft's
+binary CDN sends no CORS header, so page scripts cannot fetch them. The update API,
+Marketplace and `.vsix` CDN allow it.
+
+For deployment scripts (MECM, SCCM, Intune), the page lists Microsoft's pinned-version
+URLs, such as `https://update.code.visualstudio.com/<version>/win32-x64/stable`. Each
+redirects to that exact release. Pages is static, so the page cannot answer scripts
+itself.
+
 ## Windows online side
 
 `bin/vscode-airgap.ps1` builds the same bundle on Windows 10 1803 or later (PowerShell 5.1

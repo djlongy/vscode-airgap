@@ -152,7 +152,8 @@ OPTIONS (env var in brackets)
   --arch ARCH                    remote host: linux-x64 (default), linux-arm64,
                                  linux-armhf, alpine-x64, alpine-arm64, auto (ARCH)
   --install-dir DIR              (INSTALL_DIR)
-  --bundle-path PATH             bundle output (bundle) or input (offline) (BUNDLE_PATH)
+  --bundle-path PATH             bundle output (bundle) or input (offline) (BUNDLE_PATH).
+                                 Offline also takes a folder from the browser bundler
   --extensions LIST|FILE         comma-separated publisher.name, or a file with one
                                  per line, # comments (EXTENSIONS)
   --extensions-file FILE         same as --extensions FILE (EXTENSIONS_FILE)
@@ -1265,12 +1266,13 @@ verify_no_network_tools_needed() {
 
 run_offline() {
   [ -n "$BUNDLE_PATH" ] || die "--bundle-path is required in offline mode (path to a tarball built with --mode bundle)"
-  [ -f "$BUNDLE_PATH" ] || die "bundle not found: $BUNDLE_PATH"
+  [ -e "$BUNDLE_PATH" ] || die "bundle not found: $BUNDLE_PATH"
   verify_no_network_tools_needed
   _STAGE_DIR="$(mktemp -d)"
   trap cleanup_stage_dir EXIT
   log "extracting bundle (no network access used or required for this step)"
-  tar -C "$_STAGE_DIR" -xzf "$BUNDLE_PATH"
+  if [ -d "$BUNDLE_PATH" ]; then stage_from_dir "$BUNDLE_PATH" "$_STAGE_DIR"
+  else tar -C "$_STAGE_DIR" -xzf "$BUNDLE_PATH"; fi
   [ -f "$_STAGE_DIR/versions.json" ] || die "bundle is missing versions.json — not built by this script?"
 
   verify_artifact_sha "$_STAGE_DIR" server_artifact server_sha256 || die "sha256 mismatch on the Remote-SSH server artifact — bundle is corrupt or tampered, refusing to install"
@@ -1286,6 +1288,31 @@ run_offline() {
   fi
 
   install_from_stage "$_STAGE_DIR"
+}
+
+# stage_from_dir <dir> <stage_dir>
+# A folder from the browser bundler (docs/index.html): the binaries as
+# Microsoft names them, plus vscode-extras-v<version>.tar holding
+# versions.json and extensions/. Each binary is found by the sha256 in
+# versions.json, so the browser's file names do not matter.
+stage_from_dir() {
+  local dir="$1" stage_dir="$2" extras field name sha f found
+  extras="$(ls "$dir"/vscode-extras-v*.tar 2>/dev/null | head -1)"
+  [ -n "$extras" ] || die "no vscode-extras-v*.tar in $dir (download it from the browser bundler)"
+  tar -C "$stage_dir" -xf "$extras"
+  [ -f "$stage_dir/versions.json" ] || die "$extras has no versions.json"
+  for field in server client_linux client_windows remote_ssh_cli; do
+    name="$(json_field "$stage_dir/versions.json" "${field}_artifact")"
+    if [ -z "$name" ] || [ "$name" = "null" ]; then continue; fi
+    sha="$(json_field "$stage_dir/versions.json" "${field}_sha256")"
+    found=""
+    for f in "$dir"/*; do
+      if [ -f "$f" ] && [ "$f" != "$extras" ] && [ "$(sha256_of "$f")" = "$sha" ]; then found="$f"; break; fi
+    done
+    [ -n "$found" ] || die "no file in $dir has the sha256 of $name ($sha). Download it from the browser bundler."
+    log "$(basename "$found") is $name"
+    cp "$found" "$stage_dir/$name"
+  done
 }
 
 # verify_artifact_sha <stage_dir> <artifact-field> <sha-field>

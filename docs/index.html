@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VS Code air gap</title>
+<!--
+  Online side of vscode-airgap.sh in a browser. Microsoft's binary CDN sends no
+  CORS header, so the page cannot fetch the four VS Code files itself: it links
+  them for the user to download. It writes the extensions and versions.json into
+  vscode-extras-v<version>.tar from APIs that allow browser calls.
+  vscode-airgap.sh --mode offline --bundle-path <folder> joins the two.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #eef1f4; --ink: #1c2733; --muted: #5b6878; --rule: #c9d1da;
+  --signal: #1f5fbf; --signal-ink: #fff; --host: #dce3ea; --ok: #2e7d4f; --bad: #b3261e;
+  --gap: repeating-linear-gradient(135deg, transparent 0 7px, var(--rule) 7px 8px);
+  --sans: "IBM Plex Sans", system-ui, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #141a21; --ink: #e3e8ee; --muted: #93a0ae; --rule: #2c3743;
+  --signal: #7fb0ff; --signal-ink: #0d1b30; --host: #1b232c; --ok: #6cc28f; --bad: #ff8a80;
+} }
+:root[data-theme="dark"] {
+  --paper: #141a21; --ink: #e3e8ee; --muted: #93a0ae; --rule: #2c3743;
+  --signal: #7fb0ff; --signal-ink: #0d1b30; --host: #1b232c; --ok: #6cc28f; --bad: #ff8a80;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.55 var(--sans); }
+a { color: var(--signal); }
+code { font-family: var(--mono); font-size: .9em; }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+header { max-width: 1180px; margin: 0 auto; padding: 48px 24px 32px; }
+header h1 { font: 600 clamp(28px, 4vw, 40px)/1.1 var(--cond); margin: 0 0 8px; letter-spacing: -.01em; }
+header p { margin: 0; color: var(--muted); max-width: 62ch; }
+
+/* The commit is the one thing both sides must match, so it carries the page. */
+.commit { margin-top: 32px; }
+.commit-hash { font: 500 clamp(18px, 3.1vw, 34px)/1.2 var(--mono); display: flex; flex-wrap: wrap; gap: 0 .6em; margin: 4px 0; }
+.commit-hash span:nth-child(odd) { color: var(--ink); }
+.commit-hash span:nth-child(even) { color: var(--muted); }
+.commit-note { color: var(--muted); font-size: 15px; margin: 0; max-width: 72ch; }
+.commit-note.bad { color: var(--bad); }
+
+.sides { max-width: 1180px; margin: 0 auto; padding: 0 24px 64px; display: grid; grid-template-columns: minmax(0, 1.45fr) 48px minmax(0, 1fr); }
+.gap { background: var(--gap); border-left: 1px solid var(--rule); border-right: 1px solid var(--rule); position: relative; }
+.gap span { position: absolute; top: 16px; left: 50%; transform: translateX(-50%) rotate(180deg); writing-mode: vertical-rl; background: var(--paper); padding: 8px 2px; font: 500 13px var(--cond); color: var(--muted); }
+.side-title { font: 600 15px var(--cond); color: var(--muted); margin: 0 0 4px; }
+.online { padding-right: 32px; }
+.host { background: var(--host); padding: 24px 28px 32px; border-radius: 0 8px 8px 0; }
+
+.step { display: grid; grid-template-columns: 36px 1fr; gap: 0 12px; padding: 24px 0; border-top: 1px solid var(--rule); }
+.host .step { border-top: 0; padding-top: 8px; }
+.step > div { min-width: 0; }
+.step-n { font: 600 24px/1.2 var(--cond); color: var(--signal); }
+.step h2 { font: 600 20px/1.25 var(--cond); margin: 0 0 4px; }
+.step p { margin: 0 0 12px; color: var(--muted); max-width: 64ch; }
+
+.pickers { display: flex; flex-wrap: wrap; gap: 16px; }
+label { display: block; font-weight: 500; font-size: 14px; margin-bottom: 6px; }
+select, textarea { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; }
+select { padding: 8px 12px; min-width: 170px; }
+textarea { width: 100%; min-height: 132px; padding: 10px 12px; font: 14px/1.5 var(--mono); resize: vertical; }
+
+.files { list-style: none; margin: 0; padding: 0; }
+.files li { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: baseline; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.files li:last-child { border-bottom: 0; }
+.file-what { font-weight: 500; }
+.file-name { grid-column: 1; font: 13px var(--mono); color: var(--muted); word-break: break-all; }
+.files a { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-weight: 500; text-decoration: none; padding: 6px 12px; border: 1px solid var(--signal); border-radius: 6px; }
+.files a:hover { background: var(--signal); color: var(--signal-ink); }
+.files a.done { color: var(--ok); border-color: var(--ok); }
+.files a.done:hover { background: var(--ok); color: var(--paper); }
+
+.action { margin: 4px 0 16px; }
+body.dragging::after { content: "Drop extensions.txt"; position: fixed; inset: 12px; display: grid; place-items: center; border: 2px dashed var(--signal); border-radius: 12px; background: color-mix(in srgb, var(--paper) 88%, transparent); font: 600 24px var(--cond); color: var(--signal); pointer-events: none; }
+button { font: 600 16px var(--sans); color: var(--signal-ink); background: var(--signal); border: 0; border-radius: 6px; padding: 12px 20px; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+#log { margin: 16px 0 0; padding: 12px 14px; border-left: 3px solid var(--signal); background: var(--host); font: 13px/1.5 var(--mono); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+#log:empty { display: none; }
+
+.folder { font: 14px/1.7 var(--mono); margin: 8px 0 20px; padding: 0; list-style: none; }
+.folder li::before { content: "\251C\2500 "; color: var(--muted); }
+.folder li:last-child::before { content: "\2514\2500 "; }
+.folder .root::before { content: ""; }
+.folder .root { font-weight: 500; }
+.cmd { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; font: 13px/1.6 var(--mono); white-space: pre; overflow-x: auto; margin: 0 0 12px; }
+.cmd-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.cmd-head p { margin: 0 !important; }
+button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); background: transparent; border: 1px solid var(--signal); }
+.host { align-self: start; }
+
+.scripts { margin: 8px 0 0 48px; border-top: 1px solid var(--rule); padding-top: 20px; }
+.scripts summary { font: 600 17px var(--cond); cursor: pointer; }
+.scripts p { color: var(--muted); max-width: 64ch; }
+.scripts dl { margin: 12px 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; font-size: 14px; }
+.scripts dt { font-weight: 500; }
+.scripts dd { margin: 0; font: 13px var(--mono); overflow-wrap: anywhere; }
+
+@media (max-width: 860px) {
+  .sides { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 40px auto; }
+  .online { padding-right: 0; }
+  .gap { border: 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin: 8px 0; }
+  .gap span { writing-mode: horizontal-tb; transform: translate(-50%, -50%); top: 50%; padding: 0 8px; }
+  .host { border-radius: 8px; }
+  .scripts { margin-left: 0; }
+  header { padding: 32px 16px 24px; }
+  .sides { padding: 0 16px 48px; }
+  .host { padding: 20px 16px 24px; }
+  .step { grid-template-columns: 24px 1fr; gap: 0 8px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>VS Code air gap</h1>
+  <p>Remote-SSH only connects when your laptop and the Linux host run the same VS Code commit. Download that commit's files here, carry them over, and install them on the host. No PowerShell. Everything runs in your browser.</p>
+  <div class="commit" aria-live="polite">
+    <div class="commit-hash" id="commit-hash"></div>
+    <p class="commit-note" id="commit">Finding the latest release...</p>
+  </div>
+</header>
+
+<div class="sides">
+  <section class="online" aria-labelledby="online-title">
+    <p class="side-title" id="online-title">On this PC</p>
+
+    <div class="step">
+      <div class="step-n">1</div>
+      <div>
+        <h2>Choose the release</h2>
+        <p>Match the version your laptops run, or pick the one you are moving them to.</p>
+        <div class="pickers">
+          <div><label for="ver">VS Code version</label><select id="ver"><option>Loading...</option></select></div>
+          <div><label for="arch">Linux host</label>
+            <select id="arch">
+              <option value="linux-x64">x64</option>
+              <option value="linux-arm64">arm64</option>
+              <option value="linux-armhf">armhf (32-bit ARM)</option>
+              <option value="alpine-x64">Alpine x64</option>
+            </select></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">2</div>
+      <div>
+        <h2>Add your extensions</h2>
+        <p>Paste your extensions.txt, or drop the file anywhere on this page. One <code>publisher.name</code> per line, # lines skipped. Each extension comes at its newest build that supports this version.</p>
+        <label for="exts">Extensions (optional)</label>
+        <textarea id="exts" spellcheck="false" placeholder="ms-python.python&#10;redhat.vscode-yaml"></textarea>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">3</div>
+      <div>
+        <h2>Download everything</h2>
+        <p>Saves the four VS Code files and the extras tar, which holds the extensions and the checksums the host checks against. If your browser asks to allow multiple downloads, allow it.</p>
+        <div class="action"><button id="all" disabled>Download all</button></div>
+        <ul class="files" id="files"></ul>
+        <div id="log" role="log"></div>
+      </div>
+    </div>
+    <details class="scripts">
+      <summary>For scripts (MECM, SCCM, Intune)</summary>
+      <p>This page is static, so it cannot answer scripts. Microsoft's update server can: each URL below redirects to that exact release, so a deployment script can pin the version the hosts run. Swap the version for <code>latest</code> to follow the newest release.</p>
+      <dl id="script-urls"></dl>
+      <p>No PowerShell needed. <code>curl.exe</code> ships with Windows 10 1803 and later:</p>
+      <pre class="cmd" id="script-eg"></pre>
+    </details>
+  </section>
+
+  <div class="gap" aria-hidden="true"><span>air gap</span></div>
+
+  <section class="host" aria-labelledby="host-title">
+    <p class="side-title" id="host-title">On the air-gapped host</p>
+    <div class="step">
+      <div class="step-n">4</div>
+      <div>
+        <h2>Install from the folder</h2>
+        <p>Copy the folder across. It should hold five files:</p>
+        <ul class="folder" id="folder"></ul>
+        <div class="cmd-head"><p>Then run:</p><button type="button" class="quiet" id="copy">Copy</button></div>
+        <pre class="cmd" id="cmd">sudo /usr/local/bin/vscode-airgap.sh \
+  --mode offline \
+  --bundle-path /path/to/folder \
+  --all-users</pre>
+        <p>The script finds each file by its checksum and stops if one is missing or altered.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const UPDATE = 'https://update.code.visualstudio.com';
+const MARKET = 'https://marketplace.visualstudio.com';
+const $ = id => document.getElementById(id);
+const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; };
+
+// Bundle file name and update-API segment per artifact, as in vscode-airgap.ps1.
+// The server keeps the name server-linux-x64.tar.gz for every arch, like the scripts.
+const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-linux-arm64', 'linux-armhf': 'server-linux-armhf', 'alpine-x64': 'server-linux-alpine' };
+const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'alpine-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
+
+let release = null;  // { version, commit, artifacts: [{key, name, url, sha256, done}] }
+const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI' };
+
+async function getJson(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+async function loadVersions() {
+  const vers = await getJson(`${UPDATE}/api/releases/stable`);
+  $('ver').innerHTML = vers.map(v => `<option>${v}</option>`).join('');
+  await loadRelease();
+}
+
+async function loadRelease() {
+  const ver = $('ver').value, arch = $('arch').value;
+  scriptUrls();
+  release = null; $('commit-hash').textContent = ''; $('commit').className = 'commit-note'; $('commit').textContent = `Looking up ${ver}...`; refresh();
+  const wanted = [
+    ['server', SERVER_SEG[arch], 'server-linux-x64.tar.gz'],
+    ['client_linux', 'linux-x64', 'vscode-linux-x64.tar.gz'],
+    ['client_windows', 'win32-x64-user', `VSCodeUserSetup-x64-${ver}.exe`],
+  ];
+  if (CLI_SEG[arch]) wanted.push(['remote_ssh_cli', CLI_SEG[arch], `${CLI_SEG[arch]}.tar.gz`]);
+  try {
+    const metas = await Promise.all(wanted.map(([, seg]) => getJson(`${UPDATE}/api/versions/${ver}/${seg}/stable`)));
+    const commit = metas[0].version;
+    if (metas.some(m => m.version !== commit)) throw new Error('artifacts disagree on the commit');
+    release = { version: ver, commit, artifacts: wanted.map(([key, , name], i) => ({ key, name, url: metas[i].url, sha256: metas[i].sha256hash, done: false })) };
+    $('commit-hash').innerHTML = commit.match(/.{1,8}/g).map(g => `<span>${g}</span>`).join('');
+    $('commit').textContent = `VS Code ${ver} is commit ${commit.slice(0, 12)}. Your laptops and the host must both run it.`;
+  } catch (e) {
+    $('commit').className = 'commit-note bad';
+    $('commit').textContent = `Microsoft has no ${ver} build for this Linux host. Pick another version or host. (${e.message})`;
+  }
+  refresh();
+}
+
+// The page cannot see a browser download finish, so a clicked button says so honestly.
+const btn = done => done ? ' class="done">Download again' : '>Download';
+
+function refresh() {
+  const arts = release ? release.artifacts : [];
+  $('files').innerHTML = arts.map((a, i) =>
+    `<li>` +
+    `<span class="file-what">${WHAT[a.key]}</span><span class="file-name" title="sha256 ${a.sha256}">${a.url.split('/').pop()}</span>` +
+    `<a href="${a.url}" data-i="${i}"${btn(a.done)}</a></li>`).join('') + (release
+    ? `<li>` +
+      `<span class="file-what">Extensions and checksums</span><span class="file-name">vscode-extras-v${release.version}.tar</span>` +
+      `<a href="#" data-extras="1"${btn(release.extrasDone)}</a></li>` : '');
+  $('folder').innerHTML = release
+    ? `<li class="root">your-folder/</li>` + arts.map(a => `<li>${a.url.split('/').pop()}</li>`).join('') + `<li>vscode-extras-v${release.version}.tar</li>`
+    : '';
+  $('all').disabled = !release;
+}
+
+// ── Extensions: same selection rules as Get-Extension in vscode-airgap.ps1 ──
+const semver = v => { const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v || ''); return m ? m.slice(1).map(Number) : [0, 0, 0]; };
+const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+function engineOk(range, ver) {
+  range = (range || '').trim(); const v = semver(ver); let m;
+  if (range === '*' || range === '') return true;
+  if ((m = /^\^(\d+)\.(\d+)\.(\d+)/.exec(range))) { const lo = m.slice(1).map(Number); return cmp(v, lo) >= 0 && cmp(v, [lo[0] + 1, 0, 0]) < 0; }
+  if ((m = /^>=\s*(\d+)\.(\d+)\.(\d+)/.exec(range))) return cmp(v, m.slice(1).map(Number)) >= 0;
+  if ((m = /^(\d+)\.(\d+)\.(\d+)$/.exec(range))) return cmp(v, m.slice(1).map(Number)) === 0;
+  return true;
+}
+
+function readIds() {
+  const ids = $('exts').value.split(/[\r\n,]+/).map(s => s.trim()).filter(s => s && !s.startsWith('#'));
+  return [...new Set(ids)].sort();  // ordinal sort, like the scripts
+}
+
+async function getExtension(id, target) {
+  const [pub, ...rest] = id.split('.'); const name = rest.join('.');
+  if (!pub || !name) throw new Error(`invalid extension id '${id}' (expected publisher.name)`);
+  try {
+    const d = await getJson(`${MARKET}/_apis/public/gallery/extensionquery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json;api-version=3.0-preview.1' },
+      body: JSON.stringify({ filters: [{ criteria: [{ filterType: 7, value: id }] }], flags: 19 }),
+    });
+    const ext = d.results[0].extensions[0];
+    if (!ext) throw new Error(`extension not found: ${id}`);
+    const byVersion = new Map();
+    for (const v of ext.versions) {
+      const tp = v.targetPlatform;
+      if (tp && tp !== 'linux-x64') continue;
+      if (!byVersion.has(v.version) || tp === 'linux-x64') byVersion.set(v.version, v);
+    }
+    const sorted = [...byVersion.values()].sort((a, b) => cmp(semver(b.version), semver(a.version)));
+    for (const v of sorted) {
+      const engine = (v.properties || []).find(p => p.key === 'Microsoft.VisualStudio.Code.Engine')?.value || '*';
+      if (!engineOk(engine, target)) continue;
+      const src = v.files.find(f => f.assetType.endsWith('VSIXPackage'))?.source;
+      if (!src) throw new Error('no VSIXPackage asset in chosen version');
+      const r = await fetch(src); if (!r.ok) throw new Error(`${r.status} ${src}`);
+      return { blob: await r.blob(), meta: { id, version: v.version, target_platform: v.targetPlatform || 'universal', engine, method: 'engine-matched' } };
+    }
+    throw new Error(`no version of ${id} declares engine compatibility with ${target}`);
+  } catch (e) {
+    log(`[extensionquery fallback for ${id}: ${e.message}]`);
+    const r = await fetch(`${MARKET}/_apis/public/gallery/publishers/${pub}/vsextensions/${name}/latest/vspackage`);
+    if (!r.ok) throw new Error(`${id}: ${r.status} from the Marketplace`);
+    return { blob: await r.blob(), meta: { id, version: 'latest', target_platform: 'unknown', engine: 'unverified', method: 'latest-fallback' } };
+  }
+}
+
+// ── Manifest: same keys, order and layout as vscode-airgap.ps1 ──
+function manifest(r, arch, exts) {
+  const a = Object.fromEntries(r.artifacts.map(x => [x.key, x]));
+  const q = JSON.stringify;
+  const L = ['{', `  "channel": "stable",`, `  "commit": "${r.commit}",`, `  "vscode_version": "${r.version}",`,
+    `  "requested_version": "${r.version}",`, `  "remote_arch": "${arch}",`,
+    `  "built_at_utc": "${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}",`,
+    `  "server_artifact": "server-linux-x64.tar.gz",`, `  "server_sha256": "${a.server.sha256}",`, `  "server_sha256_source": "microsoft",`,
+    `  "client_linux_artifact": "vscode-linux-x64.tar.gz",`, `  "client_linux_sha256": "${a.client_linux.sha256}",`, `  "client_linux_sha256_source": "microsoft",`,
+    `  "client_windows_artifact": "${a.client_windows.name}",`, `  "client_windows_sha256": "${a.client_windows.sha256}",`, `  "client_windows_sha256_source": "microsoft",`,
+    `  "cli_artifact": null,`];
+  if (a.remote_ssh_cli) L.push(`  "remote_ssh_cli_artifact": "${a.remote_ssh_cli.name}",`, `  "remote_ssh_cli_sha256": "${a.remote_ssh_cli.sha256}",`, `  "remote_ssh_cli_sha256_source": "microsoft",`);
+  else L.push(`  "remote_ssh_cli_artifact": null,`);
+  L.push(`  "server_web_artifact": null,`);
+  const rows = exts.map(e => `{"id": ${q(e.id)}, "version": ${q(e.version)}, "target_platform": ${q(e.target_platform)}, "engine": ${q(e.engine)}, "method": ${q(e.method)}}`);
+  L.push(rows.length ? `  "extensions": [\n    ${rows.join(',\n    ')}\n  ]` : '  "extensions": []', '}');
+  return L.join('\n') + '\n';
+}
+
+// ── ustar writer. Entries are "./name", matching `tar -C stage -czf out .` ──
+function tarHeader(name, size, dir) {
+  const h = new Uint8Array(512), enc = new TextEncoder();
+  const put = (s, off) => h.set(enc.encode(s), off);
+  const oct = (n, len) => n.toString(8).padStart(len - 1, '0') + '\0';
+  if (enc.encode(name).length > 100) throw new Error(`path too long for tar: ${name}`);
+  put(name, 0); put(dir ? '0000755\0' : '0000644\0', 100); put('0000000\0', 108); put('0000000\0', 116);
+  put(oct(size, 12), 124); put(oct(Math.floor(Date.now() / 1000), 12), 136);
+  put('        ', 148); put(dir ? '5' : '0', 156); put('ustar\0' + '00', 257);
+  const sum = h.reduce((s, b) => s + b, 0);
+  put(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+  return h;
+}
+function tarBlob(entries) {  // entries: [name, Blob|null for a directory]
+  const parts = [];
+  for (const [name, blob] of entries) {
+    parts.push(tarHeader(name, blob ? blob.size : 0, !blob));
+    if (blob) { parts.push(blob); const pad = (512 - blob.size % 512) % 512; if (pad) parts.push(new Uint8Array(pad)); }
+  }
+  parts.push(new Uint8Array(1024));
+  return new Blob(parts);
+}
+
+async function fetchExtensions(ids, ver) {
+  const out = [];
+  for (const id of ids) {
+    log(`resolving extension ${id} (engine target: vscode ${ver})`);
+    const { blob, meta } = await getExtension(id, ver);
+    log(`  -> ${meta.id} ${meta.version} (${meta.method})`);
+    out.push({ id, blob, meta });
+  }
+  return out;
+}
+
+function save(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+// Plain tar, not gzip: a .vsix is already compressed. The binaries stay out;
+// vscode-airgap.sh --bundle-path <folder> finds them by the sha256 in versions.json.
+async function downloadExtras() {
+  const r = release, out = `vscode-extras-v${r.version}.tar`;
+  const exts = await fetchExtensions(readIds(), r.version);
+  const entries = [['./', null]];
+  if (exts.length) entries.push(['./extensions/', null], ...exts.map(e => [`./extensions/${e.id}.vsix`, e.blob]));
+  entries.push(['./versions.json', new Blob([manifest(r, $('arch').value, exts.map(e => e.meta))])]);
+  save(tarBlob(entries), out);
+  r.extrasDone = true;
+  log(`saved ${out} (${exts.length} extensions)`);
+}
+
+// The CDN sends Content-Disposition: attachment, so a hidden iframe downloads
+// without leaving the page. Spaced out because Chrome drops rapid back-to-back ones.
+async function downloadAll() {
+  $('all').disabled = true; $('log').textContent = '';
+  try {
+    for (const a of release.artifacts) {
+      const f = document.createElement('iframe');
+      f.hidden = true; f.src = a.url; document.body.append(f);
+      setTimeout(() => f.remove(), 120000);
+      a.done = true; refresh(); $('all').disabled = true;
+      log(`started ${a.url.split('/').pop()}`);
+      await new Promise(ok => setTimeout(ok, 800));
+    }
+    await downloadExtras();
+    log('All five files are downloading. Check your browser downloads, then copy the folder to the host.');
+  } catch (e) { log(`ERROR: ${e.message}`); }
+  finally { refresh(); }
+}
+
+$('ver').onchange = $('arch').onchange = loadRelease;
+$('all').onclick = downloadAll;
+$('files').onclick = e => {
+  const { i, extras } = e.target.dataset;
+  if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
+  else if (i !== undefined) { release.artifacts[i].done = true; setTimeout(refresh); }
+};
+$('copy').onclick = () => navigator.clipboard.writeText($('cmd').firstChild.textContent.replace(/ \\\n\s*/g, ' ')).then(() => { $('copy').textContent = 'Copied'; setTimeout(() => $('copy').textContent = 'Copy', 1500); });
+function scriptUrls() {
+  const v = $('ver').value;
+  if (!/^\d+\.\d+\.\d+$/.test(v)) return;
+  const rows = [['User installer', 'win32-x64-user'], ['System installer', 'win32-x64'], ['Portable zip', 'win32-x64-archive'], ['Linux client', 'linux-x64'], ['Remote-SSH server', 'server-linux-x64']];
+  $('script-urls').innerHTML = rows.map(([what, seg]) => `<dt>${what}</dt><dd>${UPDATE}/${v}/${seg}/stable</dd>`).join('');
+  $('script-eg').textContent = `curl.exe -L -o VSCodeSetup-x64-${v}.exe ${UPDATE}/${v}/win32-x64/stable\n` +
+    `curl.exe -s ${UPDATE}/api/versions/${v}/win32-x64/stable   # JSON with sha256hash`;
+}
+// Drop extensions.txt anywhere on the page.
+let depth = 0;
+addEventListener('dragenter', e => { e.preventDefault(); depth++; document.body.classList.add('dragging'); });
+addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', async e => {
+  e.preventDefault(); depth = 0; document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0]; if (!f) return;
+  const t = $('exts').value.trim();
+  $('exts').value = (t ? t + '\n' : '') + (await f.text()).trim() + '\n';
+});
+loadVersions().catch(e => log(`ERROR: cannot list releases: ${e.message}`));
+</script>
+</body>
+</html>
