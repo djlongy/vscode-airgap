@@ -97,10 +97,12 @@ button:disabled { opacity: .45; cursor: default; }
 .folder li:last-child::before { content: "\2514\2500 "; }
 .folder .root::before { content: ""; }
 .folder .root { font-weight: 500; }
-.cmd { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; font: 13px/1.6 var(--mono); white-space: pre; overflow-x: auto; margin: 0 0 12px; }
-.cmd-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.cmd-head p { margin: 0 !important; }
-button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); background: transparent; border: 1px solid var(--signal); }
+.code { border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); margin: 0 0 14px; overflow: hidden; }
+.code-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--rule); font: 500 13px var(--sans); color: var(--muted); }
+.code pre { margin: 0; padding: 12px 14px; font: 13px/1.6 var(--mono); white-space: pre; overflow-x: auto; }
+.copy { font: 500 13px var(--sans); color: var(--signal); background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 3px 10px; }
+.copy:hover { border-color: var(--signal); }
+.step h3 { font: 600 16px/1.3 var(--cond); margin: 22px 0 4px; }
 .host { align-self: start; }
 
 .scripts { margin: 8px 0 0 48px; border-top: 1px solid var(--rule); padding-top: 20px; }
@@ -187,7 +189,7 @@ button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); backgro
       <p>This page is static, so it cannot answer scripts. Microsoft's update server can: each URL below redirects to that exact release, so a deployment script can pin the version the hosts run. Swap the version for <code>latest</code> to follow the newest release.</p>
       <dl id="script-urls"></dl>
       <p>From a batch file, with the <code>curl.exe</code> built into Windows 10 1803 and later:</p>
-      <pre class="cmd" id="script-eg"></pre>
+      <div class="code"><div class="code-head"><span>Batch file</span><button type="button" class="copy">Copy</button></div><pre id="script-eg"></pre></div>
     </details>
   </section>
 
@@ -201,19 +203,24 @@ button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); backgro
         <h2>Install from the folder</h2>
         <p>Copy the folder across. It should hold five files:</p>
         <ul class="folder" id="folder"></ul>
-        <div class="cmd-head"><p>Then run:</p><button type="button" class="quiet" id="copy">Copy</button></div>
-        <pre class="cmd" id="cmd">sudo /usr/local/bin/vscode-airgap.sh \
+        <div class="code"><div class="code-head"><span>On the host</span><button type="button" class="copy">Copy</button></div>
+<pre>sudo /usr/local/bin/vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
-  --all-users</pre>
-        <p>The script finds each file by its checksum and stops if one is missing or altered.</p>
-        <p>Reach the host over ssh? Let a script copy the folder and run this for you:</p>
-        <pre class="cmd"># Linux or macOS
-vscode-airgap.sh --mode offline --bundle-path &lt;folder&gt; --remote-host user@host
-
-# Windows PowerShell
-.\vscode-airgap.ps1 -Mode install -BundlePath &lt;folder&gt; -RemoteHost user@host</pre>
-        <p>First time on this host? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and install it to <code>/usr/local/bin</code>. Setup steps are in the <a href="https://github.com/djlongy/vscode-airgap#readme">README</a>.</p>
+  --all-users</pre></div>
+        <p>The script finds each file by its checksum and stops if one is missing or altered. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
+        <h3>Or install over ssh</h3>
+        <p>From any machine that reaches the host. The script uploads the folder and itself, then runs the command above. See the <a href="https://github.com/djlongy/vscode-airgap#readme">README</a>.</p>
+        <div class="code"><div class="code-head"><span>Linux or macOS</span><button type="button" class="copy">Copy</button></div>
+<pre>./vscode-airgap.sh \
+  --mode offline \
+  --bundle-path /path/to/folder \
+  --remote-host user@host</pre></div>
+        <div class="code"><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
+<pre>.\vscode-airgap.ps1 `
+  -Mode install `
+  -BundlePath C:\path\to\folder `
+  -RemoteHost user@host</pre></div>
       </div>
     </div>
   </section>
@@ -437,14 +444,18 @@ $('files').onclick = e => {
   if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
   else if (i !== undefined) { release.artifacts[i].done = true; setTimeout(refresh); }
 };
-$('copy').onclick = () => navigator.clipboard.writeText($('cmd').firstChild.textContent.replace(/ \\\n\s*/g, ' ')).then(() => { $('copy').textContent = 'Copied'; setTimeout(() => $('copy').textContent = 'Copy', 1500); });
+// Copy joins bash (\) and PowerShell (`) line continuations into one line.
+document.querySelectorAll('.copy').forEach(b => b.onclick = () =>
+  navigator.clipboard.writeText(b.closest('.code').querySelector('pre').textContent.replace(/ [\\`]\n\s*/g, ' ').trim())
+    .then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); }));
 function scriptUrls() {
   const v = $('ver').value;
   if (!/^\d+\.\d+\.\d+$/.test(v)) return;
   const rows = [['User installer', 'win32-x64-user'], ['System installer', 'win32-x64'], ['Portable zip', 'win32-x64-archive'], ['Linux client', 'linux-x64'], ['Remote-SSH server', 'server-linux-x64']];
   $('script-urls').innerHTML = rows.map(([what, seg]) => `<dt>${what}</dt><dd>${UPDATE}/${v}/${seg}/stable</dd>`).join('');
   $('script-eg').textContent = `curl.exe -L -o VSCodeSetup-x64-${v}.exe ${UPDATE}/${v}/win32-x64/stable\n` +
-    `curl.exe -s ${UPDATE}/api/versions/${v}/win32-x64/stable   # JSON with sha256hash`;
+    `rem JSON with the sha256 to check the download against\n` +
+    `curl.exe -s ${UPDATE}/api/versions/${v}/win32-x64/stable`;
 }
 // Drop extensions.txt anywhere on the page.
 let depth = 0;
