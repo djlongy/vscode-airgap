@@ -256,7 +256,8 @@ async function getJson(url, opts) {
 
 async function loadVersions() {
   const vers = await getJson(`${UPDATE}/api/releases/stable`);
-  $('ver').innerHTML = vers.map(v => `<option>${v}</option>`).join('');
+  // Newest first from Microsoft; older releases are rarely what a host needs.
+  $('ver').innerHTML = vers.slice(0, 20).map(v => `<option>${v}</option>`).join('');
   await loadRelease();
 }
 
