@@ -98,7 +98,12 @@ button:disabled { opacity: .45; cursor: default; }
 .folder .root::before { content: ""; }
 .folder .root { font-weight: 500; }
 .code { border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); margin: 0 0 14px; overflow: hidden; }
-.code-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--rule); font: 500 13px var(--sans); color: var(--muted); }
+.code-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--rule); background: color-mix(in srgb, var(--rule) 40%, var(--paper)); font: 500 13px var(--sans); color: var(--muted); }
+.ssh-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: 22px 0 4px; }
+.ssh-head h3 { margin: 0 !important; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; padding: 2px; background: var(--paper); }
+.seg button { font: 500 13px var(--sans); color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+.seg button[aria-selected="true"] { color: var(--signal); background: color-mix(in srgb, var(--signal) 16%, var(--paper)); font-weight: 600; }
 .code pre { margin: 0; padding: 12px 14px; font: 13px/1.6 var(--mono); white-space: pre; overflow-x: auto; }
 .copy { font: 500 13px var(--sans); color: var(--signal); background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 3px 10px; }
 .copy:hover { border-color: var(--signal); }
@@ -209,14 +214,20 @@ button:disabled { opacity: .45; cursor: default; }
   --bundle-path /path/to/folder \
   --all-users</pre></div>
         <p>The script finds each file by its checksum and stops if one is missing or altered. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
-        <h3>Or install over ssh</h3>
+        <div class="ssh-head">
+          <h3>Or install over ssh</h3>
+          <div class="seg" role="tablist" aria-label="Your machine">
+            <button type="button" role="tab" data-os="linux" aria-selected="true">Linux/macOS</button>
+            <button type="button" role="tab" data-os="windows" aria-selected="false">Windows</button>
+          </div>
+        </div>
         <p>From any machine that reaches the host. The script uploads the folder and itself, then runs the command above. See the <a href="https://github.com/djlongy/vscode-airgap#readme">README</a>.</p>
-        <div class="code"><div class="code-head"><span>Linux or macOS</span><button type="button" class="copy">Copy</button></div>
+        <div class="code" data-os="linux"><div class="code-head"><span>Linux or macOS</span><button type="button" class="copy">Copy</button></div>
 <pre>./vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
   --remote-host user@host</pre></div>
-        <div class="code"><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
+        <div class="code" data-os="windows" hidden><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
 <pre>.\vscode-airgap.ps1 `
   -Mode install `
   -BundlePath C:\path\to\folder `
@@ -444,6 +455,20 @@ $('files').onclick = e => {
   if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
   else if (i !== undefined) { release.artifacts[i].done = true; setTimeout(refresh); }
 };
+// Linux/macOS or Windows for the ssh install. Starts on the visitor's OS; a
+// click is remembered in this browser only.
+function showOs(os) {
+  document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-selected', b.dataset.os === os));
+  document.querySelectorAll('.code[data-os]').forEach(c => { c.hidden = c.dataset.os !== os; });
+}
+document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
+  showOs(b.dataset.os);
+  try { localStorage.setItem('os', b.dataset.os); } catch {}
+});
+let savedOs = null;
+try { savedOs = localStorage.getItem('os'); } catch {}
+showOs(savedOs || (/Win/.test(navigator.platform || navigator.userAgent) ? 'windows' : 'linux'));
+
 // Copy joins bash (\) and PowerShell (`) line continuations into one line.
 document.querySelectorAll('.copy').forEach(b => b.onclick = () =>
   navigator.clipboard.writeText(b.closest('.code').querySelector('pre').textContent.replace(/ [\\`]\n\s*/g, ' ').trim())
