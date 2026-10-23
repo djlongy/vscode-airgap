@@ -228,10 +228,7 @@ button:disabled { opacity: .45; cursor: default; }
   --bundle-path /path/to/folder \
   --remote-host user@host</pre></div>
         <div class="code" data-os="windows" hidden><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
-<pre>.\vscode-airgap.ps1 `
-  -Mode install `
-  -BundlePath C:\path\to\folder `
-  -RemoteHost user@host</pre></div>
+<pre>.\vscode-airgap.ps1 -Mode install -BundlePath C:\path\to\folder -RemoteHost user@host</pre></div>
       </div>
     </div>
   </section>
@@ -469,9 +466,9 @@ let savedOs = null;
 try { savedOs = localStorage.getItem('os'); } catch {}
 showOs(savedOs || (/Win/.test(navigator.platform || navigator.userAgent) ? 'windows' : 'linux'));
 
-// Copy joins bash (\) and PowerShell (`) line continuations into one line.
+// Copy joins bash (\) line continuations into one line.
 document.querySelectorAll('.copy').forEach(b => b.onclick = () =>
-  navigator.clipboard.writeText(b.closest('.code').querySelector('pre').textContent.replace(/ [\\`]\n\s*/g, ' ').trim())
+  navigator.clipboard.writeText(b.closest('.code').querySelector('pre').textContent.replace(/ \\\n\s*/g, ' ').trim())
     .then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); }));
 function scriptUrls() {
   const v = $('ver').value;
