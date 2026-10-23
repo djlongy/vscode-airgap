@@ -4,13 +4,25 @@
   vscode-airgap.sh --mode offline installs on the air-gapped Linux host.
 
 .DESCRIPTION
-  Only -Mode bundle and -ListVersions exist here. Installing, linking
-  and the sshd/fapolicyd templates happen on the Linux host with
-  vscode-airgap.sh. The bundle layout and versions.json match what
-  vscode-airgap.sh --mode bundle writes, field for field.
+  -Mode bundle and -ListVersions run here. -Mode install copies a bundle
+  over ssh and runs vscode-airgap.sh --mode offline on each host, so the
+  files never need copying by hand. Linking options and the sshd/fapolicyd
+  templates stay in vscode-airgap.sh. The bundle layout and versions.json
+  match what vscode-airgap.sh --mode bundle writes, field for field.
 
 .PARAMETER Mode
   bundle: download the server, CLI, clients and extensions into one tar.gz.
+  install: copy -BundlePath to each -RemoteHost over ssh and install it there.
+
+.PARAMETER RemoteHost
+  user@host list to install on over ssh. With -Mode bundle, installs the new
+  bundle once it is built. Needs the OpenSSH client (Windows 10 1809 and later).
+
+.PARAMETER RemoteArgs
+  Arguments for vscode-airgap.sh --mode offline on the host. Default: --all-users.
+
+.PARAMETER RemoteTemp
+  Folder on the host for the upload, removed afterwards. Default: /tmp.
 
 .PARAMETER Version
   Release to stage, X.Y.Z or X.Y (newest matching patch). Default: latest stable.
@@ -23,6 +35,7 @@
 
 .PARAMETER BundlePath
   Bundle to write. Default: vscode-bundle-v<version>.tar.gz in the current folder.
+  With -Mode install: a bundle tar.gz, or a folder from the browser page.
 
 .PARAMETER Extensions
   Comma list of publisher.name IDs, or files with one ID per line.
@@ -51,12 +64,18 @@
 .EXAMPLE
   .\vscode-airgap.ps1 -ListVersions -Limit 5
 .EXAMPLE
+  .\vscode-airgap.ps1 -Mode install -BundlePath C:\Downloads\vscode -RemoteHost admin@host1,admin@host2
+  Installs a folder from the browser page on two hosts.
+.EXAMPLE
+  .\vscode-airgap.ps1 -Mode bundle -Version 1.143.1 -RemoteHost admin@host1
+  Builds the bundle, then installs it on host1.
+.EXAMPLE
   vscode-airgap.bat -Mode bundle -Version 1.143.0
   Same arguments, run with -ExecutionPolicy Bypass for a host that blocks scripts.
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('bundle')] [string]$Mode,
+  [ValidateSet('bundle', 'install')] [string]$Mode,
   [string]$Version = $env:VERSION,
   [string]$Commit = $env:COMMIT,
   [ValidateSet('linux-x64', 'linux-arm64', 'linux-armhf', 'alpine-x64')] [string]$Arch = 'linux-x64',
@@ -66,7 +85,10 @@ param(
   [switch]$ListVersions,
   [int]$Limit = 10,
   [switch]$All,
-  [ValidateSet('text', 'json')] [string]$Format = 'text'
+  [ValidateSet('text', 'json')] [string]$Format = 'text',
+  [string[]]$RemoteHost,
+  [string]$RemoteArgs = '--all-users',
+  [string]$RemoteTemp = '/tmp'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -298,9 +320,51 @@ function Invoke-Bundle {
     # tar.exe (bsdtar) ships with Windows 10 1803 and later.
     & tar -C $stage -czf $out .
     if ($LASTEXITCODE -ne 0) { Die "tar failed ($LASTEXITCODE) writing $out" }
+    $script:BuiltBundle = $out
     Log "bundle written: $out ($([math]::Round((Get-Item $out).Length / 1MB)) MB)"
     Log 'carry this file across the air gap, then run:'
     Log "  sudo /usr/local/bin/vscode-airgap.sh --mode offline --bundle-path $(Split-Path -Leaf $out) --link-home"
+  } finally {
+    Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
+  }
+}
+
+# Two connections per host: scp for the upload, then ssh -t so sudo can prompt.
+# The host's /usr/local/bin/vscode-airgap.sh is replaced with the copy next to
+# this script, so it always understands the bundle being installed.
+function Invoke-RemoteInstall([string]$bundle) {
+  foreach ($tool in 'ssh', 'scp') {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Die "$tool not found. Add the OpenSSH Client in Settings > Apps > Optional features." }
+  }
+  if (-not $RemoteHost) { Die '-RemoteHost is required for -Mode install' }
+  if (-not $bundle -or -not (Test-Path -LiteralPath $bundle)) { Die "-BundlePath not found: $bundle" }
+  $sh = Join-Path $PSScriptRoot 'vscode-airgap.sh'
+  if (-not (Test-Path -LiteralPath $sh)) { Die "vscode-airgap.sh must sit next to this script: $sh" }
+
+  $item = Get-Item -LiteralPath $bundle
+  $id = "vscode-airgap-$([guid]::NewGuid())"
+  $remote = "$($RemoteTemp.TrimEnd('/'))/$id"
+  $stage = Join-Path ([IO.Path]::GetTempPath()) $id
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  try {
+    # Hard links keep an 800 MB upload from being copied locally first.
+    $files = if ($item.PSIsContainer) { @(Get-ChildItem -LiteralPath $bundle -File) } else { @($item) }
+    foreach ($f in $files) {
+      $dst = Join-Path $stage $f.Name
+      try { New-Item -ItemType HardLink -Path $dst -Target $f.FullName -ErrorAction Stop | Out-Null } catch { Copy-Item -LiteralPath $f.FullName $dst }
+    }
+    Copy-Item -LiteralPath $sh (Join-Path $stage 'vscode-airgap.sh') -Force
+    $bundleArg = if ($item.PSIsContainer) { $remote } else { "$remote/$($item.Name)" }
+    $failed = @()
+    foreach ($h in ($RemoteHost | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) {
+      Log "copying $($files.Count + 1) files to ${h}:$remote"
+      & scp -r $stage "${h}:$remote"
+      if ($LASTEXITCODE -ne 0) { Log "ERROR: upload to $h failed ($LASTEXITCODE). If ssh said "scp: command not found", install openssh-clients on the host."; $failed += $h; continue }
+      Log "installing on $h (sudo may ask for your password)"
+      & ssh -t $h "sudo install -m 0755 '$remote/vscode-airgap.sh' /usr/local/bin/vscode-airgap.sh && sudo /usr/local/bin/vscode-airgap.sh --mode offline --bundle-path '$bundleArg' $RemoteArgs; rc=`$?; rm -rf '$remote'; exit `$rc"
+      if ($LASTEXITCODE -ne 0) { Log "ERROR: install on $h failed ($LASTEXITCODE)"; $failed += $h } else { Log "installed on $h" }
+    }
+    if ($failed) { Die "install failed on: $($failed -join ', ')" }
   } finally {
     Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
   }
@@ -320,5 +384,6 @@ function Invoke-ListVersions {
 }
 
 if ($ListVersions) { Invoke-ListVersions }
-elseif ($Mode -eq 'bundle') { Invoke-Bundle }
+elseif ($Mode -eq 'bundle') { Invoke-Bundle; if ($RemoteHost) { Invoke-RemoteInstall $BuiltBundle } }
+elseif ($Mode -eq 'install') { Invoke-RemoteInstall $BundlePath }
 else { Get-Help $MyInvocation.MyCommand.Path -Detailed; exit 2 }

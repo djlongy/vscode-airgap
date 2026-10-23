@@ -69,15 +69,24 @@ itself.
 ## Windows online side
 
 `bin/vscode-airgap.ps1` builds the same bundle on Windows 10 1803 or later (PowerShell 5.1
-and the built-in `tar.exe`). Only `-Mode bundle` and `-ListVersions` exist there: install on
-the Linux host with `vscode-airgap.sh`. Full help: `Get-Help .\vscode-airgap.ps1 -Detailed`.
+and the built-in `tar.exe`). `-Mode install` copies a bundle or a browser-page folder to
+each host over ssh and installs it there, so nothing is copied by hand. It needs the
+built-in OpenSSH client (Windows 10 1809 or later) and sudo on the host. Full help:
+`Get-Help .\vscode-airgap.ps1 -Detailed`.
 
 ```powershell
 .\vscode-airgap.ps1 -Mode bundle
 .\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -BundlePath C:\bundles\vscode-bundle-v1.143.0.tar.gz
 .\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -Extensions extensions.txt,ms-python.python
 .\vscode-airgap.ps1 -ListVersions -Limit 5
+.\vscode-airgap.ps1 -Mode install -BundlePath C:\Downloads\vscode -RemoteHost admin@host1,admin@host2
+.\vscode-airgap.ps1 -Mode bundle -Version 1.143.0 -RemoteHost admin@host1
 ```
+
+Each host gets two connections: `scp` for the upload, then `ssh -t` so sudo can ask for a
+password. The host's `/usr/local/bin/vscode-airgap.sh` is replaced with the copy next to
+the ps1, and the upload is removed afterwards. One failed host does not stop the rest,
+and the run exits 1 listing the failures.
 
 Where the execution policy blocks scripts, `bin\vscode-airgap.bat` runs the ps1 with
 `-ExecutionPolicy Bypass` and takes the same arguments, from `cmd.exe` or PowerShell:
@@ -89,6 +98,10 @@ vscode-airgap.bat -Mode bundle -Version 1.143.0
 | Name | Default | Purpose |
 |---|---|---|
 | `-Mode bundle` | none | Build the bundle |
+| `-Mode install` | none | Copy `-BundlePath` to each `-RemoteHost` over ssh and install it |
+| `-RemoteHost` | none | `user@host` list. With `-Mode bundle`, installs the new bundle |
+| `-RemoteArgs` | `--all-users` | Arguments for `vscode-airgap.sh --mode offline` on the host |
+| `-RemoteTemp` | `/tmp` | Upload folder on the host, removed afterwards |
 | `-Version` | latest stable | Release to stage, `X.Y.Z` or `X.Y` |
 | `-Commit` | none | 40-char commit, wins over `-Version` |
 | `-Arch` | `linux-x64` | Remote host: `linux-x64`, `linux-arm64`, `linux-armhf`, `alpine-x64` |
