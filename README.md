@@ -43,7 +43,7 @@ sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --all-u
 ## Browser online side
 
 `docs/index.html` does the online side in a browser, for a Windows host that cannot run
-PowerShell. Serve it from GitHub Pages or open the file locally.
+PowerShell. Live at <https://djlongy.github.io/vscode-airgap/>, or open the file locally.
 
 1. Pick the version and remote arch.
 2. Paste extension IDs, or drop `extensions.txt` on the page.
