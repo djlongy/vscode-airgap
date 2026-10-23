@@ -207,7 +207,12 @@ button.quiet { font-size: 14px; padding: 5px 12px; color: var(--signal); backgro
   --bundle-path /path/to/folder \
   --all-users</pre>
         <p>The script finds each file by its checksum and stops if one is missing or altered.</p>
-        <p>Can run PowerShell? <code>vscode-airgap.ps1 -Mode install -BundlePath &lt;folder&gt; -RemoteHost user@host</code> copies the folder and runs this for you over ssh.</p>
+        <p>Reach the host over ssh? Let a script copy the folder and run this for you:</p>
+        <pre class="cmd"># Linux or macOS
+vscode-airgap.sh --mode offline --bundle-path &lt;folder&gt; --remote-host user@host
+
+# Windows PowerShell
+.\vscode-airgap.ps1 -Mode install -BundlePath &lt;folder&gt; -RemoteHost user@host</pre>
         <p>First time on this host? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and install it to <code>/usr/local/bin</code>. Setup steps are in the <a href="https://github.com/djlongy/vscode-airgap#readme">README</a>.</p>
       </div>
     </div>

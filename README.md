@@ -9,6 +9,7 @@ Steps for a first run: [QUICKSTART.md](QUICKSTART.md).
 
 - Air-gapped host: bash, tar, sha256sum, root through sudo. Linux x64 or arm64 (`--arch`).
 - Online side: curl, python3, and git for `--version`.
+- `--remote-host`: ssh on this side, sshd and sudo on the host. One login per host, and no scp needed.
 - Script installed at `/usr/local/bin/vscode-airgap.sh`. EL sudo drops `/usr/local/bin`
   from `PATH`, so call it by full path.
 
@@ -26,6 +27,9 @@ Full set: `vscode-airgap.sh --help`.
 | Optional | `--user` | `$SUDO_USER` | Comma list of accounts to link or emit for |
 | Optional | `--all-users` | off | Links every account that already has a `~/.vscode-server` |
 | When fapolicyd | `--install-fapolicyd` | off | Writes and loads an allow rule for the install dir |
+| Optional | `--remote-host` | none | `user@host` list: copy the bundle over ssh and install it there |
+| Optional | `--remote-args` | `--all-users` | Offline flags run on each remote host |
+| Optional | `--remote-temp` | `/tmp` | Upload folder on the remote host, removed afterwards |
 
 ## Usage
 
@@ -38,6 +42,9 @@ sudo $VSA --mode bundle --version $VSCODE_VER
 
 # Air-gapped host, every update
 sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --all-users
+
+# Or from a machine that reaches the hosts over ssh: copy and install on each
+$VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz --remote-host admin@host1,admin@host2
 ```
 
 ## Browser online side

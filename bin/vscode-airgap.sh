@@ -51,6 +51,9 @@ TOKEN="${TOKEN:-}"
 EXTENSIONS="${EXTENSIONS:-}"
 EXTENSIONS_FILE="${EXTENSIONS_FILE:-}"
 BUNDLE_PATH="${BUNDLE_PATH:-}"
+REMOTE_HOST="${REMOTE_HOST:-}"              # --remote-host: install over ssh instead of here
+REMOTE_ARGS="${REMOTE_ARGS:---all-users}"   # offline flags run on each remote host
+REMOTE_TEMP="${REMOTE_TEMP:-/tmp}"          # upload folder on the remote host, removed afterwards
 ACTION="install"          # install (default) | tunnel | status | emit-ssh-config | list-versions | link-home | install-fapolicyd
 START_AFTER_INSTALL=0     # serve-web only starts if --serve-web is also given
 DOWNLOAD_ONLY=0
@@ -100,6 +103,7 @@ vscode-airgap.sh: pre-stage the VS Code Remote-SSH server on an air-gapped Linux
 USAGE
   vscode-airgap.sh --mode bundle  [--version V] [--extensions-file F]
   vscode-airgap.sh --mode offline --bundle-path B [--link-home [--user LIST] | --all-users]
+  vscode-airgap.sh --mode offline --bundle-path B --remote-host user@host[,...] [--remote-args A]
   vscode-airgap.sh --mode online  [--link-home]
   vscode-airgap.sh --link-home [--user LIST] | --all-users
   vscode-airgap.sh --emit-ssh-config [--user LIST] [--central-keys]
@@ -122,6 +126,11 @@ EXAMPLES
   # Update: install, then relink everyone who has connected before
   sudo $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz \
     --all-users
+
+  # From an online machine: copy a bundle (or a browser-page folder) to two
+  # hosts over ssh and install it on each. No sudo here, sudo runs there.
+  $VSA --mode offline --bundle-path vscode-bundle-v$VSCODE_VER.tar.gz \
+    --remote-host admin@host1,admin@host2
 
   # Onboard one more user against the installed commit
   sudo $VSA --link-home --user carol
@@ -154,6 +163,12 @@ OPTIONS (env var in brackets)
   --install-dir DIR              (INSTALL_DIR)
   --bundle-path PATH             bundle output (bundle) or input (offline) (BUNDLE_PATH).
                                  Offline also takes a folder from the browser bundler
+  --remote-host LIST             user@host list: copy the bundle over ssh and run
+                                 --mode offline there. With --mode bundle, installs
+                                 the new bundle once built (REMOTE_HOST)
+  --remote-args ARGS             offline flags for each remote host, default
+                                 --all-users (REMOTE_ARGS)
+  --remote-temp DIR              upload folder on the host, default /tmp (REMOTE_TEMP)
   --extensions LIST|FILE         comma-separated publisher.name, or a file with one
                                  per line, # comments (EXTENSIONS)
   --extensions-file FILE         same as --extensions FILE (EXTENSIONS_FILE)
@@ -212,6 +227,9 @@ while [ $# -gt 0 ]; do
     --arch) need_value "$@"; ARCH="$2"; shift 2 ;;
     --install-dir) need_value "$@"; INSTALL_DIR="$2"; shift 2 ;;
     --bundle-path) need_value "$@"; BUNDLE_PATH="$2"; shift 2 ;;
+    --remote-host) need_value "$@"; REMOTE_HOST="$2"; shift 2 ;;
+    --remote-args) need_value "$@"; REMOTE_ARGS="$2"; shift 2 ;;
+    --remote-temp) need_value "$@"; REMOTE_TEMP="$2"; shift 2 ;;
     --bind) need_value "$@"; BIND_ADDR="$2"; shift 2 ;;
     --port) need_value "$@"; PORT="$2"; shift 2 ;;
     --token) need_value "$@"; TOKEN="$2"; shift 2 ;;
@@ -2782,9 +2800,65 @@ elif [ -n "$VERSION" ] && [ "$MODE" != "offline" ]; then
   log "resolved --version $VERSION -> commit ${COMMIT:0:12}..."
 fi
 
+# ── Remote install over ssh ──────────────────────────────────────────────
+# as_invoker CMD...: run ssh as the person behind sudo, so their keys,
+# known_hosts and ssh_config apply, never root's.
+as_invoker() {
+  if is_root && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    sudo -u "$SUDO_USER" -H "$@"
+  else
+    "$@"
+  fi
+}
+
+# run_remote_install <bundle tar.gz | browser-page folder>
+# One login per host: the tar stream opens a shared ssh connection and the
+# ssh -t that runs sudo reuses it. tar on the far side, so the host needs no
+# scp. The host's /usr/local/bin/vscode-airgap.sh is replaced with this copy,
+# so it always reads the bundle format it is given.
+run_remote_install() {
+  local bundle="$1" self_dir self_name ctl id remote bundle_arg h failed=""
+  [ -n "$bundle" ] || die "--remote-host needs --bundle-path"
+  [ -e "$bundle" ] || die "bundle not found: $bundle"
+  require_cmd ssh
+  self_dir="$(cd "$(dirname "$0")" && pwd)"
+  self_name="$(basename "$0")"
+  id="vscode-airgap-$(date +%s)-$$"
+  remote="${REMOTE_TEMP%/}/$id"
+  if [ -d "$bundle" ]; then bundle_arg="$remote"; else bundle_arg="$remote/$(basename "$bundle")"; fi
+  ctl="$(as_invoker mktemp -d)"
+  local ssh_opts=(-o ControlMaster=auto -o "ControlPath=$ctl/%C" -o ControlPersist=120)
+
+  local IFS_SAVE="$IFS"; IFS=','
+  # shellcheck disable=SC2086 # split on commas only
+  set -- $REMOTE_HOST
+  IFS="$IFS_SAVE"
+  for h in "$@"; do
+    [ -n "$h" ] || continue
+    log "copying $bundle and $self_name to $h:$remote"
+    if ! { if [ -d "$bundle" ]; then
+             COPYFILE_DISABLE=1 tar -C "$bundle" --exclude='._*' -cf - . -C "$self_dir" "$self_name"
+           else
+             COPYFILE_DISABLE=1 tar -C "$(dirname "$bundle")" -cf - "$(basename "$bundle")" -C "$self_dir" "$self_name"
+           fi | as_invoker ssh "${ssh_opts[@]}" "$h" "umask 077 && mkdir '$remote' && tar -xf - -C '$remote'"; }; then
+      warn "upload to $h failed"; failed="$failed $h"; continue
+    fi
+    log "installing on $h (sudo may ask for your password)"
+    if as_invoker ssh -t "${ssh_opts[@]}" "$h" \
+        "sudo install -m 0755 '$remote/$self_name' /usr/local/bin/vscode-airgap.sh && sudo /usr/local/bin/vscode-airgap.sh --mode offline --bundle-path '$bundle_arg' $REMOTE_ARGS; rc=\$?; rm -rf '$remote'; exit \$rc"; then
+      log "installed on $h"
+    else
+      warn "install on $h failed"; failed="$failed $h"
+    fi
+    as_invoker ssh "${ssh_opts[@]}" -O exit "$h" 2>/dev/null || true
+  done
+  rm -rf "$ctl"
+  [ -z "$failed" ] || die "install failed on:$failed"
+}
+
 log "mode=$MODE channel=$CHANNEL remote_arch=$ARCH install_dir=$INSTALL_DIR"
 case "$MODE" in
   online)  run_online ;;
-  bundle)  run_bundle ;;
-  offline) run_offline ;;
+  bundle)  run_bundle; if [ -n "$REMOTE_HOST" ]; then run_remote_install "$BUNDLE_PATH"; fi ;;
+  offline) if [ -n "$REMOTE_HOST" ]; then run_remote_install "$BUNDLE_PATH"; else run_offline; fi ;;
 esac
