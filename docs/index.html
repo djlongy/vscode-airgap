@@ -80,7 +80,10 @@ textarea { width: 100%; min-height: 132px; padding: 10px 12px; font: 14px/1.5 va
 .files li:last-child { border-bottom: 0; }
 .file-what { font-weight: 500; }
 .file-name { grid-column: 1; font: 13px var(--mono); color: var(--muted); word-break: break-all; }
-.files a { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-weight: 500; text-decoration: none; padding: 6px 12px; border: 1px solid var(--signal); border-radius: 6px; }
+.file-sha { grid-column: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.file-sha code { font-size: 12px; color: var(--muted); word-break: break-all; }
+.file-sha .copy { padding: 0 8px; flex: none; }
+.files a { grid-row: 1 / span 3; grid-column: 2; align-self: center; font-weight: 500; text-decoration: none; padding: 6px 12px; border: 1px solid var(--signal); border-radius: 6px; }
 .files a:hover { background: var(--signal); color: var(--signal-ink); }
 .files a.done { color: var(--ok); border-color: var(--ok); }
 .files a.done:hover { background: var(--ok); color: var(--paper); }
@@ -183,7 +186,7 @@ button:disabled { opacity: .45; cursor: default; }
       <div class="step-n">3</div>
       <div>
         <h2>Download everything</h2>
-        <p>Saves the four VS Code files and the extras tar, which holds the extensions and the checksums the host checks against. If your browser asks to allow multiple downloads, allow it.</p>
+        <p>Saves the four VS Code files and the extras tar, which holds the extensions and the checksums the host checks against. If your browser asks to allow multiple downloads, allow it. Each sha256 is the one Microsoft publishes for that file: check a download with <code>sha256sum</code> or <code>Get-FileHash</code> before you carry it over.</p>
         <div class="action"><button id="all" disabled>Download all</button></div>
         <ul class="files" id="files"></ul>
         <div id="log" role="log"></div>
@@ -292,7 +295,8 @@ function refresh() {
   const arts = release ? release.artifacts : [];
   $('files').innerHTML = arts.map((a, i) =>
     `<li>` +
-    `<span class="file-what">${WHAT[a.key]}</span><span class="file-name" title="sha256 ${a.sha256}">${a.url.split('/').pop()}</span>` +
+    `<span class="file-what">${WHAT[a.key]}</span><span class="file-name">${a.url.split('/').pop()}</span>` +
+    (a.sha256 ? `<span class="file-sha"><code>sha256 ${a.sha256}</code><button type="button" class="copy" data-sha="${a.sha256}">Copy</button></span>` : '') +
     `<a href="${a.url}" data-i="${i}"${btn(a.done)}</a></li>`).join('') + (release
     ? `<li>` +
       `<span class="file-what">Extensions and checksums</span><span class="file-name">vscode-extras-v${release.version}.tar</span>` +
@@ -449,8 +453,9 @@ async function downloadAll() {
 $('ver').onchange = $('arch').onchange = loadRelease;
 $('all').onclick = downloadAll;
 $('files').onclick = e => {
-  const { i, extras } = e.target.dataset;
-  if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
+  const { i, extras, sha } = e.target.dataset;
+  if (sha) navigator.clipboard.writeText(sha).then(() => { e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1500); });
+  else if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
   else if (i !== undefined) { release.artifacts[i].done = true; setTimeout(refresh); }
 };
 // Linux/macOS or Windows for the ssh install. Starts on the visitor's OS; a
