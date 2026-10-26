@@ -68,6 +68,7 @@ header p { margin: 0; color: var(--muted); max-width: 62ch; }
 .step-n { font: 600 24px/1.2 var(--cond); color: var(--signal); }
 .step h2 { font: 600 20px/1.25 var(--cond); margin: 0 0 4px; }
 .step p { margin: 0 0 12px; color: var(--muted); max-width: 64ch; }
+.step p code { white-space: nowrap; }
 
 .pickers { display: flex; flex-wrap: wrap; gap: 16px; }
 label { display: block; font-weight: 500; font-size: 14px; margin-bottom: 6px; }
@@ -80,7 +81,10 @@ textarea { width: 100%; min-height: 132px; padding: 10px 12px; font: 14px/1.5 va
 .files li:last-child { border-bottom: 0; }
 .file-what { font-weight: 500; }
 .file-name { grid-column: 1; font: 13px var(--mono); color: var(--muted); word-break: break-all; }
-.files a { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-weight: 500; text-decoration: none; padding: 6px 12px; border: 1px solid var(--signal); border-radius: 6px; }
+.file-sha { grid-column: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.file-sha code { font-size: 12px; color: var(--muted); word-break: break-all; }
+.file-sha .copy { padding: 0 8px; flex: none; }
+.files a { grid-row: 1 / span 3; grid-column: 2; align-self: center; font-weight: 500; text-decoration: none; padding: 6px 12px; border: 1px solid var(--signal); border-radius: 6px; }
 .files a:hover { background: var(--signal); color: var(--signal-ink); }
 .files a.done { color: var(--ok); border-color: var(--ok); }
 .files a.done:hover { background: var(--ok); color: var(--paper); }
@@ -163,7 +167,6 @@ button:disabled { opacity: .45; cursor: default; }
               <option value="linux-x64">x64</option>
               <option value="linux-arm64">arm64</option>
               <option value="linux-armhf">armhf (32-bit ARM)</option>
-              <option value="alpine-x64">Alpine x64</option>
             </select></div>
         </div>
       </div>
@@ -183,7 +186,7 @@ button:disabled { opacity: .45; cursor: default; }
       <div class="step-n">3</div>
       <div>
         <h2>Download everything</h2>
-        <p>Saves the four VS Code files and the extras tar, which holds the extensions and the checksums the host checks against. If your browser asks to allow multiple downloads, allow it.</p>
+        <p>Saves the four VS Code files and the extras tar, which holds the extensions and the checksums the host checks against. If your browser asks to allow multiple downloads, allow it. Each sha256 is the one Microsoft publishes for that file: check a download with <code>sha256sum</code> or <code>Get-FileHash</code> before you carry it over.</p>
         <div class="action"><button id="all" disabled>Download all</button></div>
         <ul class="files" id="files"></ul>
         <div id="log" role="log"></div>
@@ -212,8 +215,9 @@ button:disabled { opacity: .45; cursor: default; }
 <pre>sudo /usr/local/bin/vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
+  --install-dir /opt/vscode-server \
   --all-users</pre></div>
-        <p>The script finds each file by its checksum and stops if one is missing or altered. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
+        <p>The script finds each file by its checksum and stops if one is missing or altered. <code>/opt/vscode-server</code> is the shared tree every user links to. To install for your own account only, run it without <code>sudo</code>, <code>--install-dir</code> and <code>--all-users</code>: it then installs in <code>~/.vscode-server</code>. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
         <div class="ssh-head">
           <h3>Or install over ssh</h3>
           <div class="seg" role="tablist" aria-label="Your machine">
@@ -226,9 +230,11 @@ button:disabled { opacity: .45; cursor: default; }
 <pre>./vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
-  --remote-host user@host</pre></div>
+  --remote-host user@host \
+  --remote-args "--all-users \
+    --install-dir /opt/vscode-server"</pre></div>
         <div class="code" data-os="windows" hidden><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
-<pre>.\vscode-airgap.ps1 -Mode install -BundlePath C:\path\to\folder -RemoteHost user@host</pre></div>
+<pre>.\vscode-airgap.ps1 -Mode install -BundlePath C:\path\to\folder -RemoteHost user@host -RemoteArgs '--all-users --install-dir /opt/vscode-server'</pre></div>
       </div>
     </div>
   </section>
@@ -242,11 +248,13 @@ const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e
 
 // Bundle file name and update-API segment per artifact, as in vscode-airgap.ps1.
 // The server keeps the name server-linux-x64.tar.gz for every arch, like the scripts.
-const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-linux-arm64', 'linux-armhf': 'server-linux-armhf', 'alpine-x64': 'server-linux-alpine' };
-const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'alpine-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
+// Alpine hosts are left out here; vscode-airgap.ps1 -Arch alpine-x64 still builds one.
+// cli-alpine-* is Microsoft's static CLI build, which Remote-SSH uses on every Linux host.
+const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-linux-arm64', 'linux-armhf': 'server-linux-armhf' };
+const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
 
 let release = null;  // { version, commit, artifacts: [{key, name, url, sha256, done}] }
-const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI' };
+const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI (static, runs on any Linux)' };
 
 async function getJson(url, opts) {
   const r = await fetch(url, opts);
@@ -292,7 +300,8 @@ function refresh() {
   const arts = release ? release.artifacts : [];
   $('files').innerHTML = arts.map((a, i) =>
     `<li>` +
-    `<span class="file-what">${WHAT[a.key]}</span><span class="file-name" title="sha256 ${a.sha256}">${a.url.split('/').pop()}</span>` +
+    `<span class="file-what">${WHAT[a.key]}</span><span class="file-name">${a.url.split('/').pop()}</span>` +
+    (a.sha256 ? `<span class="file-sha"><code>sha256 ${a.sha256}</code><button type="button" class="copy" data-sha="${a.sha256}">Copy</button></span>` : '') +
     `<a href="${a.url}" data-i="${i}"${btn(a.done)}</a></li>`).join('') + (release
     ? `<li>` +
       `<span class="file-what">Extensions and checksums</span><span class="file-name">vscode-extras-v${release.version}.tar</span>` +
@@ -449,8 +458,9 @@ async function downloadAll() {
 $('ver').onchange = $('arch').onchange = loadRelease;
 $('all').onclick = downloadAll;
 $('files').onclick = e => {
-  const { i, extras } = e.target.dataset;
-  if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
+  const { i, extras, sha } = e.target.dataset;
+  if (sha) navigator.clipboard.writeText(sha).then(() => { e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1500); });
+  else if (extras) { e.preventDefault(); downloadExtras().catch(err => log(`ERROR: ${err.message}`)).finally(refresh); }
   else if (i !== undefined) { release.artifacts[i].done = true; setTimeout(refresh); }
 };
 // Linux/macOS or Windows for the ssh install. Starts on the visitor's OS; a
