@@ -68,6 +68,7 @@ header p { margin: 0; color: var(--muted); max-width: 62ch; }
 .step-n { font: 600 24px/1.2 var(--cond); color: var(--signal); }
 .step h2 { font: 600 20px/1.25 var(--cond); margin: 0 0 4px; }
 .step p { margin: 0 0 12px; color: var(--muted); max-width: 64ch; }
+.step p code { white-space: nowrap; }
 
 .pickers { display: flex; flex-wrap: wrap; gap: 16px; }
 label { display: block; font-weight: 500; font-size: 14px; margin-bottom: 6px; }
@@ -215,8 +216,9 @@ button:disabled { opacity: .45; cursor: default; }
 <pre>sudo /usr/local/bin/vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
+  --install-dir /opt/vscode-server \
   --all-users</pre></div>
-        <p>The script finds each file by its checksum and stops if one is missing or altered. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
+        <p>The script finds each file by its checksum and stops if one is missing or altered. <code>/opt/vscode-server</code> is the shared tree every user links to. To install for your own account only, run it without <code>sudo</code>, <code>--install-dir</code> and <code>--all-users</code>: it then installs in <code>~/.vscode-server</code>. Installing by hand for the first time? Copy <a href="https://github.com/djlongy/vscode-airgap/blob/main/bin/vscode-airgap.sh">vscode-airgap.sh</a> across too and put it in <code>/usr/local/bin</code>.</p>
         <div class="ssh-head">
           <h3>Or install over ssh</h3>
           <div class="seg" role="tablist" aria-label="Your machine">
@@ -229,9 +231,11 @@ button:disabled { opacity: .45; cursor: default; }
 <pre>./vscode-airgap.sh \
   --mode offline \
   --bundle-path /path/to/folder \
-  --remote-host user@host</pre></div>
+  --remote-host user@host \
+  --remote-args "--all-users \
+    --install-dir /opt/vscode-server"</pre></div>
         <div class="code" data-os="windows" hidden><div class="code-head"><span>Windows PowerShell</span><button type="button" class="copy">Copy</button></div>
-<pre>.\vscode-airgap.ps1 -Mode install -BundlePath C:\path\to\folder -RemoteHost user@host</pre></div>
+<pre>.\vscode-airgap.ps1 -Mode install -BundlePath C:\path\to\folder -RemoteHost user@host -RemoteArgs '--all-users --install-dir /opt/vscode-server'</pre></div>
       </div>
     </div>
   </section>
