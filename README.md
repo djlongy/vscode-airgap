@@ -111,7 +111,7 @@ vscode-airgap.bat -Mode bundle -Version 1.143.0
 | `-RemoteTemp` | `/tmp` | Upload folder on the host, removed afterwards |
 | `-Version` | latest stable | Release to stage, `X.Y.Z` or `X.Y` |
 | `-Commit` | none | 40-char commit, wins over `-Version` |
-| `-Arch` | `linux-x64` | Remote host: `linux-x64`, `linux-arm64`, `linux-armhf`, `alpine-x64` |
+| `-Arch` | `linux-x64` | Remote host: `linux-x64` (RHEL, Ubuntu, Oracle Linux), `linux-arm64`, `linux-armhf`. `alpine-x64` only when named |
 | `-BundlePath` | `vscode-bundle-v<version>.tar.gz` | Bundle to write |
 | `-Extensions` | none | Comma list of `publisher.name` or files with one per line |
 | `-ExtensionsFile` | none | File with one `publisher.name` per line |

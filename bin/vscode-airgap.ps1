@@ -31,7 +31,8 @@
   40-character commit. Wins over -Version.
 
 .PARAMETER Arch
-  Remote host platform: linux-x64 (default), linux-arm64, linux-armhf, alpine-x64.
+  Remote host platform: linux-x64 (default, for RHEL, Ubuntu, Oracle Linux),
+  linux-arm64, linux-armhf. alpine-x64 only when named.
 
 .PARAMETER BundlePath
   Bundle to write. Default: vscode-bundle-v<version>.tar.gz in the current folder.

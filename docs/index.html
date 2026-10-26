@@ -167,7 +167,6 @@ button:disabled { opacity: .45; cursor: default; }
               <option value="linux-x64">x64</option>
               <option value="linux-arm64">arm64</option>
               <option value="linux-armhf">armhf (32-bit ARM)</option>
-              <option value="alpine-x64">Alpine x64</option>
             </select></div>
         </div>
       </div>
@@ -249,11 +248,13 @@ const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e
 
 // Bundle file name and update-API segment per artifact, as in vscode-airgap.ps1.
 // The server keeps the name server-linux-x64.tar.gz for every arch, like the scripts.
-const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-linux-arm64', 'linux-armhf': 'server-linux-armhf', 'alpine-x64': 'server-linux-alpine' };
-const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'alpine-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
+// Alpine hosts are left out here; vscode-airgap.ps1 -Arch alpine-x64 still builds one.
+// cli-alpine-* is Microsoft's static CLI build, which Remote-SSH uses on every Linux host.
+const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-linux-arm64', 'linux-armhf': 'server-linux-armhf' };
+const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
 
 let release = null;  // { version, commit, artifacts: [{key, name, url, sha256, done}] }
-const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI' };
+const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI (static, runs on any Linux)' };
 
 async function getJson(url, opts) {
   const r = await fetch(url, opts);
