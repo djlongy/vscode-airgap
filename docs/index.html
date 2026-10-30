@@ -254,7 +254,7 @@ const SERVER_SEG = { 'linux-x64': 'server-linux-x64', 'linux-arm64': 'server-lin
 const CLI_SEG = { 'linux-x64': 'cli-alpine-x64', 'linux-arm64': 'cli-alpine-arm64' };
 
 let release = null;  // { version, commit, artifacts: [{key, name, url, sha256, done}] }
-const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client installer', remote_ssh_cli: 'Remote-SSH CLI (static, runs on any Linux)' };
+const WHAT = { server: 'Remote-SSH server', client_linux: 'Linux client', client_windows: 'Windows client user installer', client_windows_system: 'Windows client system installer (optional, not used by the host)', remote_ssh_cli: 'Remote-SSH CLI (static, runs on any Linux)' };
 
 async function getJson(url, opts) {
   const r = await fetch(url, opts);
@@ -277,13 +277,14 @@ async function loadRelease() {
     ['server', SERVER_SEG[arch], 'server-linux-x64.tar.gz'],
     ['client_linux', 'linux-x64', 'vscode-linux-x64.tar.gz'],
     ['client_windows', 'win32-x64-user', `VSCodeUserSetup-x64-${ver}.exe`],
+    ['client_windows_system', 'win32-x64', `VSCodeSetup-x64-${ver}.exe`, true],
   ];
   if (CLI_SEG[arch]) wanted.push(['remote_ssh_cli', CLI_SEG[arch], `${CLI_SEG[arch]}.tar.gz`]);
   try {
     const metas = await Promise.all(wanted.map(([, seg]) => getJson(`${UPDATE}/api/versions/${ver}/${seg}/stable`)));
     const commit = metas[0].version;
     if (metas.some(m => m.version !== commit)) throw new Error('artifacts disagree on the commit');
-    release = { version: ver, commit, artifacts: wanted.map(([key, , name], i) => ({ key, name, url: metas[i].url, sha256: metas[i].sha256hash, done: false })) };
+    release = { version: ver, commit, artifacts: wanted.map(([key, , name, extra], i) => ({ key, name, extra, url: metas[i].url, sha256: metas[i].sha256hash, done: false })) };
     $('commit-hash').innerHTML = commit.match(/.{1,8}/g).map(g => `<span>${g}</span>`).join('');
     $('commit').textContent = `VS Code ${ver} is commit ${commit.slice(0, 12)}. Your VS Code and the host must both run it.`;
   } catch (e) {
@@ -307,7 +308,7 @@ function refresh() {
       `<span class="file-what">Extensions and checksums</span><span class="file-name">vscode-extras-v${release.version}.tar</span>` +
       `<a href="#" data-extras="1"${btn(release.extrasDone)}</a></li>` : '');
   $('folder').innerHTML = release
-    ? `<li class="root">your-folder/</li>` + arts.map(a => `<li>${a.url.split('/').pop()}</li>`).join('') + `<li>vscode-extras-v${release.version}.tar</li>`
+    ? `<li class="root">your-folder/</li>` + arts.filter(a => !a.extra).map(a => `<li>${a.url.split('/').pop()}</li>`).join('') + `<li>vscode-extras-v${release.version}.tar</li>`
     : '';
   $('all').disabled = !release;
 }
@@ -441,7 +442,7 @@ async function downloadExtras() {
 async function downloadAll() {
   $('all').disabled = true; $('log').textContent = '';
   try {
-    for (const a of release.artifacts) {
+    for (const a of release.artifacts.filter(a => !a.extra)) {
       const f = document.createElement('iframe');
       f.hidden = true; f.src = a.url; document.body.append(f);
       setTimeout(() => f.remove(), 120000);
